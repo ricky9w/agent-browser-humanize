@@ -39,7 +39,7 @@ Keep a human pace: wait 1–3 seconds after a page loads before acting, and do n
 
 The proxy blocks `Runtime.enable`, so the CDP Runtime domain is not enabled for pages. Runtime events (`Runtime.consoleAPICalled`, `Runtime.exceptionThrown`, execution context events and others) do not reach agent-browser, and commands that depend on them, such as `console` and `errors`, return nothing. Commands that call `Runtime.evaluate` or `Runtime.callFunctionOn` directly, such as `eval` and `get`, are unaffected.
 
-To debug, run `agent-browser-humanize runtime on <session>`. It enables the Runtime domain on the session's current tab, and console messages and exceptions from before are replayed. When done, run `agent-browser-humanize runtime off <session>`, which disables it on every tab the session turned it on for.
+To debug, run `agent-browser-humanize runtime on <session>`. It enables the Runtime domain on the session's current tab, and console messages and exceptions from before are replayed. When done, run `agent-browser-humanize runtime off <session>`, which disables it on every tab the session turned it on for. If you run agent-browser with `--namespace <name>`, pass the same option to both commands.
 
 ## Notes
 

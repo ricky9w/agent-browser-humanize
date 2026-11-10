@@ -40,7 +40,10 @@ function openUpstream(url: string, onMessage: (text: string) => void, onClose: (
 
 export function startProxy({ port, upstream, humanizer, agentBrowser, log = () => {}, keeper = new FocusKeeper(upstream, { log }) }: ProxyOptions) {
   const connections = new Set<Connection>();
-  /** Per agent-browser session name, the targets turned on through the control API, so `off` reaches tabs it left. */
+  /**
+   * Per agent-browser session (`namespace/session`, or the name alone without a namespace), the targets turned on
+   * through the control API, so `off` reaches tabs it left.
+   */
   const runtimeTabs = new Map<string, Set<string>>();
   const json = (body: object, status = 200) => Response.json(body, { status });
   /** Turns Runtime on or off for every session of a target; returns how many sessions it has. */
@@ -60,16 +63,19 @@ export function startProxy({ port, upstream, humanizer, agentBrowser, log = () =
   }
 
   async function setRuntime(req: Request): Promise<Response> {
-    const body: { targetId?: unknown; enabled?: unknown; session?: unknown } = (await req.json().catch(() => undefined)) ?? {};
-    const { targetId, enabled, session } = body;
-    if (typeof targetId !== "string" || typeof enabled !== "boolean" || (session !== undefined && !(typeof session === "string" && SESSION_NAME.test(session)))) {
-      return json({ error: "expected {targetId: string, enabled: boolean, session?: agent-browser session name}" }, 400);
+    const body: { targetId?: unknown; enabled?: unknown; session?: unknown; namespace?: unknown } = (await req.json().catch(() => undefined)) ?? {};
+    const { targetId, enabled, session, namespace } = body;
+    const name = (value: unknown) => value === undefined || (typeof value === "string" && SESSION_NAME.test(value));
+    if (typeof targetId !== "string" || typeof enabled !== "boolean" || !name(session) || !name(namespace)) {
+      return json({ error: "expected {targetId: string, enabled: boolean, session?: agent-browser session name, namespace?: agent-browser namespace}" }, 400);
     }
+    // Sessions of different agent-browser namespaces may share a name.
+    const key = typeof session === "string" ? (namespace ? `${namespace}/${session}` : session) : undefined;
     pruneRuntimeTabs();
     if (!enabled) {
       // Also every tab the session turned on before: it may have switched tabs since.
-      const ids = new Set([targetId, ...((session && runtimeTabs.get(session)) || [])]);
-      if (session) runtimeTabs.delete(session);
+      const ids = new Set([targetId, ...((key && runtimeTabs.get(key)) || [])]);
+      if (key) runtimeTabs.delete(key);
       let tabs = 0, sessions = 0;
       for (const id of ids) {
         if ([...connections].some((c) => c.runtimeSwitchedOn(id))) tabs++;
@@ -85,7 +91,7 @@ export function startProxy({ port, upstream, humanizer, agentBrowser, log = () =
       if (!targets.includes(targetId)) return json({ error: "the tab is gone" }, 404);
       return json({ error: "no agent-browser connection is attached to the tab" }, 409);
     }
-    if (session) runtimeTabs.set(session, (runtimeTabs.get(session) ?? new Set()).add(targetId));
+    if (key) runtimeTabs.set(key, (runtimeTabs.get(key) ?? new Set()).add(targetId));
     log(`runtime on: ${sessions} session(s)`);
     return json({ targetId, enabled, sessions });
   }

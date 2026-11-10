@@ -214,6 +214,22 @@ describe("WebSocket", () => {
     await close();
   });
 
+  test("sessions of different namespaces with the same name are recorded apart", async () => {
+    const { close } = await twoTabs();
+    expect((await post({ targetId: "T1", enabled: true, session: "abh-n", namespace: "proj-a" })).status).toBe(200);
+    expect((await post({ targetId: "T2", enabled: true, session: "abh-n", namespace: "proj-b" })).status).toBe(200);
+    expect([...runtimeTabs.keys()].sort()).toEqual(["proj-a/abh-n", "proj-b/abh-n"]);
+    await until(() => runtimeSent().length === 2);
+    // proj-a's session has switched to T3: off reaches its recorded T1, not proj-b's T2.
+    expect(await (await post({ targetId: "T3", enabled: false, session: "abh-n", namespace: "proj-a" })).json()).toEqual({ targetId: "T3", enabled: false, tabs: 1, sessions: 1 });
+    await until(() => runtimeSent().length === 3);
+    expect(runtimeSent()).toEqual(["Runtime.enable S1", "Runtime.enable S2", "Runtime.disable S1"]);
+    expect([...runtimeTabs.keys()]).toEqual(["proj-b/abh-n"]);
+    expect((await post({ targetId: "T2", enabled: false, session: "abh-n", namespace: "proj-b" })).status).toBe(200);
+    expect(runtimeTabs.size).toBe(0);
+    await close();
+  });
+
   test("without a session, off reaches only the given tab", async () => {
     const { close } = await twoTabs();
     expect((await runtime("T1", true)).status).toBe(200);
@@ -257,6 +273,9 @@ describe("WebSocket", () => {
       expect((await post({ targetId: "T1", enabled: false, session })).status).toBe(400);
     }
     expect((await post({ targetId: "T1", enabled: false, session: "x".repeat(128) })).status).toBe(200);
+    for (const namespace of ["", "a/b", "../x", 5]) {
+      expect((await post({ targetId: "T1", enabled: false, session: "abh-x", namespace })).status).toBe(400);
+    }
   });
 
   test("Target.createTarget opens tabs in the background unless the client asks for a window, background or focus", async () => {

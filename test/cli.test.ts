@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentBrowserMonitor } from "../src/agent-browser-check.ts";
-import { DEFAULT_PORT, DEFAULT_UPSTREAM, USAGE, localPort, proxyPort, serveConfig, sessionDir } from "../src/cli.ts";
+import { DEFAULT_PORT, DEFAULT_UPSTREAM, USAGE, agentBrowserConfig, localPort, namespaceOf, proxyPort, sanitizeNamespace, serveConfig, sessionDir } from "../src/cli.ts";
 import { Humanizer } from "../src/humanize.ts";
 import { TYPING_CPS } from "../src/keyboard.ts";
 import { startProxy } from "../src/server.ts";
@@ -82,15 +82,43 @@ describe("the proxy's port for runtime", () => {
   });
 
   test("AGENT_BROWSER_HUMANIZE_PORT, then AGENT_BROWSER_CDP, then cdp in agent-browser's config file, then the default", async () => {
-    const config = join(dir, "port-config.json");
-    writeFileSync(config, JSON.stringify({ cdp: "19400" }));
-    expect(await proxyPort({ AGENT_BROWSER_HUMANIZE_PORT: "9401", AGENT_BROWSER_CDP: "9402", AGENT_BROWSER_CONFIG: config })).toBe(9401);
-    expect(await proxyPort({ AGENT_BROWSER_CDP: "ws://127.0.0.1:9402/devtools/browser/x", AGENT_BROWSER_CONFIG: config })).toBe(9402);
-    expect(await proxyPort({ AGENT_BROWSER_CONFIG: config })).toBe(19400);
-    expect(await proxyPort({ AGENT_BROWSER_CONFIG: join(dir, "missing.json") })).toBe(DEFAULT_PORT);
+    const file = join(dir, "port-config.json");
+    writeFileSync(file, JSON.stringify({ cdp: "19400" }));
+    const config = await agentBrowserConfig({ AGENT_BROWSER_CONFIG: file });
+    expect(config).toEqual({ cdp: "19400" });
+    expect(proxyPort({ AGENT_BROWSER_HUMANIZE_PORT: "9401", AGENT_BROWSER_CDP: "9402" }, config)).toBe(9401);
+    expect(proxyPort({ AGENT_BROWSER_CDP: "ws://127.0.0.1:9402/devtools/browser/x" }, config)).toBe(9402);
+    expect(proxyPort({}, config)).toBe(19400);
+    expect(proxyPort({}, await agentBrowserConfig({ AGENT_BROWSER_CONFIG: join(dir, "missing.json") }))).toBe(DEFAULT_PORT);
     // agent-browser connects to a remote browser: no local proxy to find.
-    expect(await proxyPort({ AGENT_BROWSER_CDP: "ws://10.0.0.5:9222", AGENT_BROWSER_CONFIG: config })).toBe(DEFAULT_PORT);
-    await expect(proxyPort({ AGENT_BROWSER_HUMANIZE_PORT: "x" })).rejects.toThrow("invalid AGENT_BROWSER_HUMANIZE_PORT: x");
+    expect(proxyPort({ AGENT_BROWSER_CDP: "ws://10.0.0.5:9222" }, config)).toBe(DEFAULT_PORT);
+    expect(() => proxyPort({ AGENT_BROWSER_HUMANIZE_PORT: "x" }, {})).toThrow("invalid AGENT_BROWSER_HUMANIZE_PORT: x");
+  });
+});
+
+describe("agent-browser namespaces", () => {
+  test("names become directory names as agent-browser makes them", () => {
+    // Cases from agent-browser's own tests (cli/src/validation.rs, connection.rs).
+    expect(sanitizeNamespace("Next Dev Loop: /Users/me/worktree!")).toBe("next-dev-loop-users-me-worktree");
+    expect(sanitizeNamespace(" --Agent__ ")).toBe("agent");
+    expect(sanitizeNamespace("Worktree: One")).toBe("worktree-one");
+    expect(sanitizeNamespace("Café-東京_7")).toBe("café-東京_7");
+    expect(sanitizeNamespace("a--b__c")).toBe("a-b_c");
+    expect(sanitizeNamespace("!!")).toBe("");
+  });
+
+  test("--namespace, then AGENT_BROWSER_NAMESPACE (even when empty), then namespace in the config file", () => {
+    const config = { namespace: "From Config" };
+    expect(namespaceOf("Opt", { AGENT_BROWSER_NAMESPACE: "env" }, config)).toBe("opt");
+    expect(namespaceOf(undefined, { AGENT_BROWSER_NAMESPACE: "Env" }, config)).toBe("env");
+    expect(namespaceOf(undefined, { AGENT_BROWSER_NAMESPACE: "" }, config)).toBe("");
+    expect(namespaceOf(undefined, {}, config)).toBe("from-config");
+    expect(namespaceOf(undefined, {}, {})).toBe("");
+  });
+
+  test("a namespace's session files are in <dir>/namespaces/<namespace>/run", () => {
+    expect(sessionDir({ AGENT_BROWSER_SOCKET_DIR: "/s" }, "proj-a")).toBe("/s/namespaces/proj-a/run");
+    expect(sessionDir({ AGENT_BROWSER_SOCKET_DIR: "/s" }, "")).toBe("/s");
   });
 });
 
@@ -152,6 +180,17 @@ describe("command line", () => {
     const config = join(dir, "agent-browser.json");
     writeFileSync(config, JSON.stringify({ cdp: `ws://127.0.0.1:${server.port}/devtools/browser/x`, pinTab: true }));
     expect(await cli(["runtime", "off", "abh-cdp"], { AGENT_BROWSER_CONFIG: config })).toEqual(ok);
+  });
+
+  test("runtime reads the binding of the session's namespace: --namespace or AGENT_BROWSER_NAMESPACE", async () => {
+    mkdirSync(join(dir, "namespaces", "proj-a", "run"), { recursive: true });
+    writeFileSync(join(dir, "namespaces", "proj-a", "run", "abh-ns.target"), JSON.stringify({ targetId: "T1", url: "about:blank", pinned: true }));
+    const env = { AGENT_BROWSER_HUMANIZE_PORT: String(server.port) };
+    const ok = { stdout: "Runtime off for abh-ns (namespace proj-a): turned off in 0 tabs", stderr: "", code: 0 };
+    expect(await cli(["runtime", "off", "--namespace", "Proj A", "abh-ns"], env)).toEqual(ok);
+    expect(await cli(["runtime", "off", "abh-ns"], { ...env, AGENT_BROWSER_NAMESPACE: "proj-a" })).toEqual(ok);
+    // Without the namespace, the session is not found: its binding is not in the shared directory.
+    expect(await cli(["runtime", "off", "abh-ns"], env)).toMatchObject({ stderr: expect.stringMatching(/^agent-browser-humanize: session abh-ns has no pinned tab/), code: 1 });
   });
 
   test("runtime fails with exit 1 and one line: no binding, bad session name, proxy not running", async () => {
