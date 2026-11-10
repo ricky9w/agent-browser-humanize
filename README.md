@@ -1,6 +1,6 @@
 # agent-browser-humanize
 
-A local CDP proxy between [agent-browser](https://github.com/vercel-labs/agent-browser) and Chrome. It hides the DevTools `Runtime` domain from pages, turns agent-browser's instant input into input that looks like a person's, and keeps the tabs agent-browser works in visible and focused in the background, so that several sessions can share one Chrome without changing what is on screen.
+A local CDP proxy between [agent-browser](https://github.com/vercel-labs/agent-browser) and Chrome. It hides the DevTools `Runtime` domain from pages, turns agent-browser's instant input into input that looks like a person's, and keeps the tabs agent-browser works in visible and focused in the background, so that several sessions can share one Chrome without changing what is on screen. It also closes the tabs of sessions that ended with `close`, which agent-browser leaves open on a Chrome it did not start.
 
 agent-browser itself is not changed, and you call it as before. Only the CDP port it connects to changes, from Chrome's (`9222`) to the proxy's (`9333`).
 
@@ -11,6 +11,7 @@ Bun and TypeScript, no runtime dependencies. agent-browser-humanize is an indepe
 - **Runtime domain.** agent-browser sends `Runtime.enable` on every tab it attaches to. While it is enabled, Chrome formats every logged error at once, and a page notices that through `Error.prepareStackTrace`. Bot detectors such as deviceandbrowserinfo, FPScanner, Pixelscan, Fingerprint-Scan and rebrowser flag it.
 - **Focus.** An agent's Chrome often runs where nobody looks at it: on a machine whose screen is locked, or shared by several sessions, of which at most one tab per window can be in front. Chrome reports a page in a background tab or window as hidden and unfocused and stops its animation frames. CDP input still reaches such a page, so it receives clicks and keystrokes while it says nobody can see it, which a person cannot do. agent-browser never asks Chrome to emulate focus. And a session that opens or switches tabs brings its tab to the front, over the tab a person may be working in by hand, for example for a login.
 - **Input.** agent-browser clicks with one `mouseMoved` exactly at the sub-pixel centre of the element and a 1-2 ms press, with pointer pressure 0. `fill` focuses and clears the field from page script, firing an untrusted `input` event, and then inserts the whole text at once. `type` inserts one character after another with no key events. `press` has no hold, an empty `code` for symbols such as `@`, and no Shift key event for `Shift+X`. `scroll` calls `scrollBy` from page script. None of this is what a real mouse and keyboard produce.
+- **Tabs.** On a Chrome it did not start, agent-browser's `close` only disconnects. Every session leaves the tabs it opened, and in a browser that runs for weeks they pile up.
 
 ## Requirements
 
@@ -78,7 +79,7 @@ ln -s "$PWD/skills/agent-browser-humanize" <skills-directory>/agent-browser-huma
 
 ## Run in the background
 
-The proxy is a single long-running process. Run it under your service manager, and make sure Bun and agent-browser can be found there: `agent-browser-humanize` starts with `#!/usr/bin/env bun`, and the self-check looks for `agent-browser` on `PATH`. Service managers start with a minimal `PATH`, so set one that contains both, or set `AGENT_BROWSER_HUMANIZE_AGENT_BROWSER` to agent-browser's path. `which agent-browser-humanize bun agent-browser` shows the paths to use. Chrome must be started separately.
+The proxy is a single long-running process. Run it under your service manager, and make sure Bun and agent-browser can be found there: `agent-browser-humanize` starts with `#!/usr/bin/env bun`, and the self-check looks for `agent-browser` on `PATH`. Service managers start with a minimal `PATH`, so set one that contains both, or set `AGENT_BROWSER_HUMANIZE_AGENT_BROWSER` to agent-browser's path. `which agent-browser-humanize bun agent-browser` shows the paths to use. The proxy reads agent-browser's session files to [close the tabs of ended sessions](#tabs-of-ended-sessions), so if you set `AGENT_BROWSER_SOCKET_DIR` or `XDG_RUNTIME_DIR` for agent-browser, set them for the proxy too. Chrome must be started separately.
 
 **macOS (launchd).** Save as `~/Library/LaunchAgents/com.example.agent-browser-humanize.plist`, replacing the `/path/to` placeholders with absolute paths (launchd expands neither `~` nor `$HOME`):
 
@@ -166,7 +167,7 @@ It reads the session's pinned tab from agent-browser's binding file (`<session>.
 
 agent-browser connects to the proxy exactly as it would to Chrome. The proxy answers the HTTP discovery endpoints (`/json/version`, `/json`, `/json/list`, `/json/new`, `/json/close/*`, `/json/activate/*`) from Chrome's, with WebSocket URLs pointing at itself. It pipes every `/devtools/...` WebSocket to the same path on Chrome. For each client connection it tracks which flattened CDP session belongs to which target, and the target's type, from `Target.attachedToTarget` events and `Target.attachToTarget` responses (Chrome sends the event, with the type, before the response; a page-level socket's own target comes from its path).
 
-The proxy rewrites only `Runtime.enable`, `Runtime.disable`, `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.insertText` and three agent-browser page functions it recognizes. It adds `background: true` to `Target.createTarget`, answers `Page.bringToFront` itself, and holds the answer to the `Page.enable` that brings a connection to a tab until the tab is emulated as focused. It sends its own commands on the same session the client used, with ids of its own. Chrome's responses to those stay in the proxy, and the client gets one answer per command, as if Chrome had run it. Everything else passes through byte for byte. Besides one upstream connection per client, the proxy has one DevTools connection of its own, the focus keeper.
+The proxy rewrites only `Runtime.enable`, `Runtime.disable`, `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.insertText` and three agent-browser page functions it recognizes. It adds `background: true` to `Target.createTarget` and notes the tab Chrome creates, answers `Page.bringToFront` itself, and holds the answer to the `Page.enable` that brings a connection to a tab until the tab is emulated as focused. It sends its own commands on the same session the client used, with ids of its own. Chrome's responses to those stay in the proxy, and the client gets one answer per command, as if Chrome had run it. Everything else passes through byte for byte. Besides one upstream connection per client, the proxy has one DevTools connection of its own, the focus keeper.
 
 ### Runtime domain
 
@@ -228,6 +229,16 @@ Agent tabs never change what is on screen. With focus emulation they need not be
 - `Target.activateTarget` passes through: agent-browser needs it to revive tabs Chrome discarded (Memory Saver).
 - Counters: `target.background`, `Page.bringToFront.answered`.
 
+### Tabs of ended sessions
+
+On a Chrome it did not start (`--cdp`, `--auto-connect`), agent-browser's `close` disconnects and leaves every tab the session opened; agent-browser 0.41.2 does not track which tabs it created. The proxy closes them:
+
+- It notes the tabs each client connection creates, from Chrome's answers to `Target.createTarget`.
+- A few seconds after a connection closes, it reads agent-browser's session bindings (`<session>.target` in agent-browser's session directory, `AGENT_BROWSER_SOCKET_DIR`, `$XDG_RUNTIME_DIR/agent-browser` or `~/.agent-browser`, and in `namespaces/*/run` below it). When a binding names one of the connection's tabs with `pinned: false`, and no binding with `pinned: true` names any of them, it closes all of the connection's tabs, the ones the session switched away from with `tab new` included. Only `close` writes `pinned: false`.
+- A session that went away without `close` (agent-browser shuts an idle session down after an hour by default, or it crashed) keeps `pinned: true`, so its tabs stay and it comes back to them under the same name. If it later ends with `close`, its tabs are closed then. A check every five minutes, while such tabs exist, catches sessions that were closed while none of their connections was open.
+- Tabs no binding names are never closed: tabs of unpinned sessions, of other CDP clients that use the proxy, and tabs people open.
+- Tabs are closed through Chrome's `/json/close`. Each closing is logged with the number of tabs. Counter: `tabs.closed`.
+
 ### agent-browser self-check
 
 Recognition depends on agent-browser's exact function sources, and the agent-browser version is not pinned. agent-browser is a Rust binary that embeds these sources verbatim as string literals, so the proxy looks for them in the installed binary: at startup, and again when a client connects or `/__humanize/health` is requested and the binary's path, size or modification time has changed since the last check. The check runs in the background and its result is cached; clients never wait for it.
@@ -272,6 +283,10 @@ agent-browser can also get its CDP URL from a `browser.provider` plugin. In 0.41
 - Every emulated tab reports focus, so several tabs report focus at the same time, which a person's browser never does.
 - A tab is emulated while any connected session has `Page` enabled on it, and that is more tabs than the sessions' own: the first existing tab a session enables domains on when it connects (often another session's or a person's), and every tab opened in Chrome while a session is connected, because agent-browser attaches to new tabs and enables `Page` on them without switching to them. Such a tab stays emulated until the last of those sessions has let go of it; one session ending does not take the focus from tabs other sessions still use.
 - While the focus keeper reconnects (about a second, after its connection dropped with Chrome still running), background tabs in use report hidden and unfocused.
+- Closing the tabs of ended sessions relies on the session files of agent-browser 0.41.2. If a later version changes them, the proxy stops closing tabs; it never closes tabs it cannot attribute to a closed session.
+- The proxy notes tabs in memory. Tabs created before it started, or before it restarted, stay open after their session's `close`.
+- After `close`, a session name that is used again finds its tab gone (`tab_gone`) and needs `tab new <url>`.
+- A session that switched to a tab it did not create (`tab <tab>`) and then ended with `close` leaves its own tabs open, because its binding names the other tab.
 - Tabs that pages open themselves (`target=_blank`, `window.open`) are Chrome's decision and come to the front. So does a discarded tab that agent-browser revives with `Target.activateTarget`.
 - The proxy never brings an agent tab to the front, so to take over a session's tab by hand, click it.
 
@@ -283,7 +298,7 @@ bun run check     # tsc
 bun test          # unit tests
 ```
 
-The unit tests cover the US layout, Shift, typing timing, pointer paths, wheel steps, recognition, the self-check, the humanizer on both platforms, routing, the focus keeper, background tabs, the browser platform and the command line.
+The unit tests cover closing the tabs of ended sessions and reading agent-browser's session files, the US layout, Shift, typing timing, pointer paths, wheel steps, recognition, the self-check, the humanizer on both platforms, routing, the focus keeper, background tabs, the browser platform and the command line.
 
 ```sh
 bun test/integration.ts [--chrome <path>] [--headless] [--external]
@@ -296,7 +311,7 @@ The integration test drives agent-browser through the proxy against a real Chrom
 - `--upstream <host:port>` attaches to a running Chrome instead. This is for advanced use: the test then opens tabs in that browser and closes them again.
 - `--external` also runs rebrowser's public bot detector and checks its `runtimeEnableLeak`.
 
-It checks the self-check's result in health and the log, that opening and switching session tabs leaves Chrome's focused tab alone (seen through `document.hasFocus()` in a control tab opened straight on Chrome, and skipped when that does not show a tab opened in front), that the session's tab is visible, focused and rendering, two sessions clicking and filling in their own tabs at the same time, a session's tab staying visible and focused and still taking a click and a `fill` after another session ended, an `alert` and a `confirm` handled with `dialog accept` and `dismiss` and a screenshot in a background agent tab, click points, holds and pressure, keystrokes and Shift for short `fill`s, select-all for the platform Chrome runs on, a single `insertText` for long ones, typing speed, wheel scrolling, and the `runtime` command with `agent-browser console` and after a tab switch. Run it after changing input rules and after upgrading agent-browser or Chrome.
+It checks the self-check's result in health and the log, that the tabs of a session that ended with `close` are closed while a session that shut down idle keeps its tab and comes back to it, that opening and switching session tabs leaves Chrome's focused tab alone (seen through `document.hasFocus()` in a control tab opened straight on Chrome, and skipped when that does not show a tab opened in front), that the session's tab is visible, focused and rendering, two sessions clicking and filling in their own tabs at the same time, a session's tab staying visible and focused and still taking a click and a `fill` after another session ended, an `alert` and a `confirm` handled with `dialog accept` and `dismiss` and a screenshot in a background agent tab, click points, holds and pressure, keystrokes and Shift for short `fill`s, select-all for the platform Chrome runs on, a single `insertText` for long ones, typing speed, wheel scrolling, and the `runtime` command with `agent-browser console` and after a tab switch. Run it after changing input rules and after upgrading agent-browser or Chrome.
 
 ## License
 

@@ -19,7 +19,9 @@ This assumes the setup from the project README: agent-browser's `cdp` points at 
 - Refs belong to one tab: run `snapshot -i` again after switching.
 - `tab` lists every tab in the browser. Switch only to tabs your task opened.
 - `tab_gone` means your tab was closed. Open a new one with `tab new <url>`; never take over another tab.
-- When done, close every tab your task opened (`tab close` for the current one, `tab close <tab>` for others), then run `close`. `close` only disconnects; Chrome keeps running.
+- When done, run `close`. The proxy then closes every tab the session opened; Chrome keeps running.
+- To keep a tab for later, or while a person works in it, leave the session open and do not run `close`. A session left idle shuts down after an hour, but keeps its tab and comes back to it under the same name.
+- After `close`, use a new session name for more work; the old name's tab is gone (`tab_gone`).
 
 ## What pages can see
 

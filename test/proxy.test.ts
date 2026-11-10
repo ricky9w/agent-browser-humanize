@@ -4,6 +4,8 @@ import { AgentBrowserMonitor } from "../src/agent-browser-check.ts";
 import { FocusKeeper } from "../src/focus.ts";
 import { Humanizer } from "../src/humanize.ts";
 import { startProxy } from "../src/server.ts";
+import type { Binding } from "../src/sessions.ts";
+import { SessionTabs } from "../src/tabs.ts";
 import { fakeClock } from "./helpers.ts";
 
 // A fake Chrome: discovery endpoints plus WebSockets that record what they receive. Only the focus keeper connects to
@@ -52,7 +54,16 @@ const chrome: Bun.Server<{ path: string }> = Bun.serve({
 const upstream = `127.0.0.1:${chrome.port}`;
 const agentBrowser = new AgentBrowserMonitor(() => {}, { AGENT_BROWSER_HUMANIZE_AGENT_BROWSER: "/nonexistent/agent-browser" });
 const keeper = new FocusKeeper(upstream, { rebuildDelay: 50, timeout: 2000 });
-const { server, connections, runtimeTabs } = startProxy({ port: 0, upstream, humanizer: new Humanizer(fakeClock()), agentBrowser, keeper });
+/** agent-browser's bindings as the proxy reads them, and the tabs it closed. */
+const bindings: Binding[] = [];
+const tabsClosed: string[] = [];
+const sessionTabs = new SessionTabs({
+  bindings: async () => bindings,
+  tabs: async () => targets,
+  close: async (id) => void tabsClosed.push(id),
+  delay: 1,
+});
+const { server, connections, runtimeTabs } = startProxy({ port: 0, upstream, humanizer: new Humanizer(fakeClock()), agentBrowser, keeper, sessionTabs });
 const base = `http://127.0.0.1:${server.port}`;
 afterAll(() => {
   server.stop(true);
@@ -302,6 +313,19 @@ describe("WebSocket", () => {
     ]);
     expect(received.map((m) => m.id)).toEqual(asked.map((_, i) => i + 1));
     await close();
+  });
+
+  test("tabs a client created are closed after its session ended with close", async () => {
+    const { messages, send, emit, close } = await connect();
+    send({ id: 7, method: "Target.createTarget", params: { url: "about:blank" } });
+    await until(() => received.length === 1);
+    emit({ id: 7, result: { targetId: "T3" } });
+    await until(() => messages.length === 1);
+    expect(messages[0]).toEqual({ id: 7, result: { targetId: "T3" } });
+    bindings.push({ targetId: "T3", pinned: false });
+    await close();
+    await until(() => tabsClosed.includes("T3"));
+    bindings.length = 0;
   });
 
   test("Page.bringToFront is answered locally; Target.activateTarget passes through", async () => {

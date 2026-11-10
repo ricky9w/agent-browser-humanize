@@ -10,9 +10,8 @@ import { Humanizer } from "./humanize.ts";
 import { TYPING_CPS } from "./keyboard.ts";
 import { macOSBrowser } from "./platform.ts";
 import { SESSION_NAME, startProxy } from "./server.ts";
+import { sessionDir, type Env } from "./sessions.ts";
 import { snapshot } from "./stats.ts";
-
-type Env = Record<string, string | undefined>;
 
 export const DEFAULT_PORT = 9333;
 /** Chrome's usual remote debugging port. */
@@ -73,16 +72,6 @@ export function sanitizeNamespace(value: string): string {
 export function namespaceOf(option: string | undefined, env: Env, config: Record<string, unknown>): string {
   const value = option ?? env.AGENT_BROWSER_NAMESPACE ?? config.namespace;
   return typeof value === "string" ? sanitizeNamespace(value) : "";
-}
-
-/** Where agent-browser keeps its session files, as agent-browser itself picks it: per namespace when there is one. */
-export function sessionDir(env: Env = process.env, namespace = ""): string {
-  const base = env.AGENT_BROWSER_SOCKET_DIR
-    ? env.AGENT_BROWSER_SOCKET_DIR
-    : env.XDG_RUNTIME_DIR
-      ? join(env.XDG_RUNTIME_DIR, "agent-browser")
-      : join(homedir(), ".agent-browser");
-  return namespace ? join(base, "namespaces", namespace, "run") : base;
 }
 
 /** The port of a CDP endpoint on this machine, as agent-browser's `cdp` takes it: `9333`, `host:9333` or a URL. */

@@ -327,6 +327,36 @@ async function otherSessionEnds() {
   }
 }
 
+async function endedSessions() {
+  console.log("\n# tabs of sessions that end");
+  const pages = async () =>
+    ((await (await fetch(`http://${upstream}/json/list`)).json()) as { id: string; type: string }[]).filter((t) => t.type === "page").map((t) => t.id);
+  /** Whether all of `ids` are gone within `ms`; the proxy checks 3 s after a session's connection closes. */
+  const gone = async (ids: string[], ms = 10_000) => {
+    for (let t = 0; t < ms; t += 250, await Bun.sleep(250)) if ((await pages()).every((id) => !ids.includes(id))) return true;
+    return false;
+  };
+  const [done, idle] = [`${session}-done`, `${session}-idle`];
+  const tag = `ended-${Date.now()}`;
+  await abAs(done, "open", probeUrl(`${tag}-a`));
+  const first = await pinnedTab(done);
+  await abAs(done, "tab", "new", probeUrl(`${tag}-b`));
+  const second = await pinnedTab(done);
+  await abAs(done, "close");
+  const both = [first, second].filter((id): id is string => Boolean(id));
+  check("the tabs of a session that ended with close are closed, the one it switched away from too", both.length === 2 && first !== second && (await gone(both)));
+
+  // An idle shutdown leaves the binding pinned: the session can come back to its tab.
+  await abAs(idle, "--idle-timeout", "2s", "open", probeUrl(`${tag}-c`));
+  const tab = await pinnedTab(idle);
+  await Bun.sleep(7000);
+  const kept = Boolean(tab && (await pages()).includes(tab));
+  const back = await abAs(idle, "get", "url");
+  check("a session that shut down idle keeps its tab and comes back to it", kept && back.code === 0 && (await pinnedTab(idle)) === tab, back.out.slice(0, 120));
+  await abAs(idle, "close");
+  check("and its tab is closed once it ends with close", Boolean(tab) && (await gone([tab!])));
+}
+
 async function backgroundTab() {
   console.log("\n# dialogs and screenshot in a background agent tab");
   const tag = `dialog-${Date.now()}`;
@@ -561,6 +591,7 @@ try {
   await focusEmulation();
   await parallel();
   await otherSessionEnds();
+  await endedSessions();
   await backgroundTab();
   await clicks();
   await keyboard();

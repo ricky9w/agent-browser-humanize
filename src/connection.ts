@@ -54,12 +54,21 @@ export class Connection {
   private nextId = FIRST_PROXY_ID;
   private pending = new Map<number, Pending>();
   private attaching = new Map<number, string>(); // client Target.attachToTarget id -> targetId
+  private creating = new Set<number>(); // client Target.createTarget ids
   private sessions = new Map<string, Session>(); // "" is the socket's own session
   private runtimeTargets = new Set<string>(); // targets whose Runtime the control API turned on
   private focusTargets = new Set<string>(); // targets retained with the focus keeper
   private closed = false;
 
-  constructor(path: string, private client: Socket, private upstream: Socket, private humanizer: Humanizer, private focus: Focus) {
+  /** `created` hears of every tab the client creates. */
+  constructor(
+    path: string,
+    private client: Socket,
+    private upstream: Socket,
+    private humanizer: Humanizer,
+    private focus: Focus,
+    private created: (targetId: string) => void = () => {},
+  ) {
     const page = /^\/devtools\/page\/([^/?]+)/.exec(path)?.[1];
     this.sessions.set("", new Session(page, page ? "page" : "browser"));
   }
@@ -87,6 +96,7 @@ export class Connection {
       return this.reply(msg, {});
     }
     const p = msg.params;
+    if (msg.method === "Target.createTarget") this.creating.add(msg.id);
     if (msg.method === "Target.createTarget" && typeof p === "object" && p && p.newWindow !== true && p.background === undefined && p.focus !== true) {
       count("target.background");
       return this.upstream.send(JSON.stringify({ ...msg, params: { ...p, background: true } }));
@@ -109,7 +119,7 @@ export class Connection {
     // Most traffic is forwarded without parsing: Chrome writes "id" or "method" first.
     const head = text.slice(0, 80);
     const id = /^\{"id":(\d+)/.exec(head)?.[1];
-    if (id !== undefined && !this.pending.has(Number(id)) && !this.attaching.has(Number(id))) return this.client.send(text);
+    if (id !== undefined && !this.pending.has(Number(id)) && !this.attaching.has(Number(id)) && !this.creating.has(Number(id))) return this.client.send(text);
     const method = /^\{"method":"([^"]+)"/.exec(head)?.[1];
     if (method !== undefined && !TARGET_EVENTS.has(method)) return this.client.send(text);
     let msg: any;
@@ -123,6 +133,10 @@ export class Connection {
       if (pending) {
         this.pending.delete(msg.id);
         return msg.error ? pending.reject(new CdpError(msg.error)) : pending.resolve(msg.result ?? {});
+      }
+      if (this.creating.delete(msg.id)) {
+        if (typeof msg.result?.targetId === "string") this.created(msg.result.targetId);
+        return this.client.send(text);
       }
       // Chrome sends Target.attachedToTarget, with the target's type, before this response; keep that session.
       const targetId = this.attaching.get(msg.id);

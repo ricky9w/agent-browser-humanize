@@ -3,7 +3,9 @@ import type { AgentBrowserMonitor } from "./agent-browser-check.ts";
 import { Connection, type Socket } from "./connection.ts";
 import { FocusKeeper } from "./focus.ts";
 import type { Humanizer } from "./humanize.ts";
+import { readBindings } from "./sessions.ts";
 import { snapshot } from "./stats.ts";
+import { SessionTabs, type Created } from "./tabs.ts";
 
 export interface ProxyOptions {
   /** Port to listen on (127.0.0.1); 0 picks a free one. */
@@ -15,6 +17,8 @@ export interface ProxyOptions {
   agentBrowser?: AgentBrowserMonitor;
   /** The owner of focus emulation; one on `upstream` by default. */
   keeper?: FocusKeeper;
+  /** Closes the tabs of sessions that ended with `close`; one on `upstream` and agent-browser's files by default. */
+  sessionTabs?: SessionTabs;
   log?: (line: string) => void;
 }
 
@@ -38,7 +42,32 @@ function openUpstream(url: string, onMessage: (text: string) => void, onClose: (
   };
 }
 
-export function startProxy({ port, upstream, humanizer, agentBrowser, log = () => {}, keeper = new FocusKeeper(upstream, { log }) }: ProxyOptions) {
+/** The tabs of sessions that ended with `close`, read from agent-browser's files and closed through Chrome's endpoint. */
+function chromeSessionTabs(upstream: string, log: (line: string) => void) {
+  const timeout = () => AbortSignal.timeout(2000);
+  return new SessionTabs({
+    bindings: () => readBindings(),
+    tabs: async () => {
+      const res = await fetch(`http://${upstream}/json/list`, { signal: timeout() }).catch(() => undefined);
+      return res?.ok ? ((await res.json()) as { id: string; type: string }[]).filter((t) => t.type === "page").map((t) => t.id) : undefined;
+    },
+    close: async (id) => {
+      const res = await fetch(`http://${upstream}/json/close/${encodeURIComponent(id)}`, { method: "PUT", signal: timeout() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    },
+    log,
+  });
+}
+
+export function startProxy({
+  port,
+  upstream,
+  humanizer,
+  agentBrowser,
+  log = () => {},
+  keeper = new FocusKeeper(upstream, { log }),
+  sessionTabs = chromeSessionTabs(upstream, log),
+}: ProxyOptions) {
   const connections = new Set<Connection>();
   /**
    * Per agent-browser session (`namespace/session`, or the name alone without a namespace), the targets turned on
@@ -96,7 +125,7 @@ export function startProxy({ port, upstream, humanizer, agentBrowser, log = () =
     return json({ targetId, enabled, sessions });
   }
 
-  const server = Bun.serve<{ path: string; conn?: Connection }>({
+  const server = Bun.serve<{ path: string; conn?: Connection; created?: Created }>({
     hostname: "127.0.0.1",
     port,
     async fetch(req, server) {
@@ -132,7 +161,8 @@ export function startProxy({ port, upstream, humanizer, agentBrowser, log = () =
         const client: Socket = { send: (text) => void ws.send(text), close: () => ws.close() };
         let conn: Connection | undefined;
         const up = openUpstream(`ws://${upstream}${ws.data.path}`, (text) => conn?.fromUpstream(text), () => conn?.close());
-        conn = ws.data.conn = new Connection(ws.data.path, client, up, humanizer, keeper);
+        const created = (ws.data.created = sessionTabs.open());
+        conn = ws.data.conn = new Connection(ws.data.path, client, up, humanizer, keeper, created.add);
         connections.add(conn);
         log(`client connected (${connections.size} open)`);
         void agentBrowser?.refresh();
@@ -144,6 +174,7 @@ export function startProxy({ port, upstream, humanizer, agentBrowser, log = () =
         const conn = ws.data.conn;
         if (!conn || !connections.delete(conn)) return;
         conn.close();
+        ws.data.created?.end();
         log(`client disconnected (${connections.size} open)`);
       },
     },

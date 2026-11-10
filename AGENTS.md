@@ -6,6 +6,7 @@ Read `README.md` before planning or changing this project. It owns the design, t
 
 - Never log, print, persist or put into an error message typed text, `insertText` payloads or any CDP message body. Log counts and method names only: password managers and other credential tools may type secrets through this proxy.
 - Keep zero runtime dependencies; Bun built-ins cover everything.
+- Close a tab only when a client created it through the proxy and agent-browser's bindings say its session ended with `close`. Never close tabs the proxy cannot attribute that way.
 - Recognize agent-browser's page functions only by their exact source, copied from the agent-browser version in use. Anything not recognized passes through unchanged.
 - Before using a library or API (CDP methods, Bun, agent-browser), read its current docs, for example with `npx ctx7@latest`.
 - Run `bun run check` and `bun test` before committing. Update `README.md` in the same commit when behaviour, limits or configuration change; documents describe the design, not test results.
