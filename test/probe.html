@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Human input probe</title>
+<style>
+  body { font: 16px system-ui; margin: 24px }
+  #box { width: 300px; height: 120px; overflow: auto; border: 1px solid #999 }
+  #box div { height: 900px; background: linear-gradient(#fff, #ccd) }
+  #filler { height: 2400px }
+</style>
+</head>
+<body>
+<h1>Contact form</h1>
+<p><button id="btn" type="button">Press me</button> <span id="out"></span></p>
+<p><button id="alert" type="button">Alert</button> <button id="confirm" type="button">Confirm</button></p>
+<p><label for="name">Name</label> <input id="name" type="text" autocomplete="off"></p>
+<p><label for="bio">Bio</label><br><textarea id="bio" rows="3" cols="40"></textarea></p>
+<div id="box"><div>Scrollable box</div></div>
+<div id="filler">Long content</div>
+<script>
+  // Records input events with trust flags, coordinates, pressure, keys and timing, whether a DevTools client's
+  // Runtime domain serializes console arguments, whether the page is visible and focused, and how its dialogs
+  // closed. Reports to the integration test's server.
+  const R = { tag: new URLSearchParams(location.search).get("tag") || "run", events: [], runtimeHits: 0, runtimeChecks: 0 };
+  const name = (t) => (t && t.id ? `${t.tagName.toLowerCase()}#${t.id}` : t && t.nodeName);
+  const types = ["pointermove", "pointerdown", "pointerup", "mousemove", "mousedown", "mouseup", "click", "dblclick", "wheel", "keydown", "keyup", "input"];
+  for (const type of types) addEventListener(type, (e) => {
+    if (R.events.length < 5000) R.events.push({ type, t: performance.now(), trusted: e.isTrusted, target: name(e.target), x: e.clientX, y: e.clientY,
+      pressure: e.pressure, detail: e.detail, deltaY: e.deltaY, key: e.key, code: e.code, keyCode: e.keyCode, location: e.location,
+      shift: e.shiftKey, meta: e.metaKey, ctrl: e.ctrlKey, inputType: e.inputType, dataLength: e.data == null ? undefined : e.data.length });
+  }, { capture: true, passive: true });
+  // A DevTools client with Runtime enabled formats logged errors at once, which calls Error.prepareStackTrace.
+  setInterval(() => {
+    R.runtimeChecks++;
+    let hit = false;
+    const original = Error.prepareStackTrace;
+    Error.prepareStackTrace = (error) => { hit = true; return String(error); };
+    console.debug(new Error("probe"));
+    Error.prepareStackTrace = original;
+    if (hit) R.runtimeHits++;
+  }, 100);
+  // Whether the page thinks it is seen: visibility, focus and animation frame rate, sampled once a second,
+  // and every visibility or focus change.
+  let frames = 0, last = performance.now();
+  const frame = () => { frames++; requestAnimationFrame(frame); };
+  requestAnimationFrame(frame);
+  Object.assign(R, { samples: [], changes: [] });
+  setInterval(() => {
+    const now = performance.now();
+    Object.assign(R, { fps: Math.round(frames * 1000 / (now - last)), visible: document.visibilityState === "visible", focused: document.hasFocus() });
+    frames = 0; last = now;
+    if (R.samples.length < 1000) R.samples.push({ t: now, visible: R.visible, focused: R.focused, fps: R.fps });
+  }, 1000);
+  for (const type of ["focus", "blur"]) addEventListener(type, () => R.changes.push({ type, t: performance.now() }));
+  document.addEventListener("visibilitychange", () => R.changes.push({ type: document.visibilityState, t: performance.now() }));
+  document.getElementById("btn").addEventListener("click", () => { document.getElementById("out").textContent = "pressed"; });
+  R.dialogs = [];
+  document.getElementById("alert").addEventListener("click", () => { alert("abh-alert"); R.dialogs.push("alert closed"); });
+  document.getElementById("confirm").addEventListener("click", () => { R.dialogs.push(`confirm ${confirm("abh-confirm")}`); });
+  const report = () => {
+    const $ = (id) => document.getElementById(id);
+    Object.assign(R, { scrollY, boxScroll: $("box").scrollTop, values: { name: $("name").value, bio: $("bio").value }, btn: $("btn").getBoundingClientRect().toJSON() });
+    fetch("/report", { method: "POST", body: JSON.stringify(R) }).catch(() => {});
+  };
+  setInterval(report, 300);
+</script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+{
+  "name": "agent-browser-humanize",
+  "version": "0.1.0",
+  "description": "CDP proxy for agent-browser: hides the Runtime domain from pages, makes input human-like, and keeps agent tabs focused in the background.",
+  "keywords": [
+    "agent-browser",
+    "ai-agents",
+    "browser-automation",
+    "cdp",
+    "chrome",
+    "chrome-devtools-protocol",
+    "bot-detection",
+    "proxy"
+  ],
+  "homepage": "https://github.com/ricky9w/agent-browser-humanize#readme",
+  "bugs": {
+    "url": "https://github.com/ricky9w/agent-browser-humanize/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ricky9w/agent-browser-humanize.git"
+  },
+  "license": "MIT",
+  "author": "ricky9w",
+  "type": "module",
+  "bin": {
+    "agent-browser-humanize": "src/cli.ts"
+  },
+  "files": [
+    "src",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "bun src/cli.ts serve",
+    "check": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "engines": {
+    "bun": ">=1.4.4"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}
