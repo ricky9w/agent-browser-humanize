@@ -2,6 +2,7 @@
 import type { AgentBrowserMonitor } from "./agent-browser-check.ts";
 import { Connection, type Socket } from "./connection.ts";
 import { FocusKeeper } from "./focus.ts";
+import { Holds, TARGET_ID } from "./hold.ts";
 import type { Humanizer } from "./humanize.ts";
 import { readBindings } from "./sessions.ts";
 import { snapshot } from "./stats.ts";
@@ -19,6 +20,8 @@ export interface ProxyOptions {
   keeper?: FocusKeeper;
   /** Closes the tabs of sessions that ended with `close`; one on `upstream` and agent-browser's files by default. */
   sessionTabs?: SessionTabs;
+  /** The tabs a person has taken over. */
+  holds?: Holds;
   log?: (line: string) => void;
 }
 
@@ -42,8 +45,11 @@ function openUpstream(url: string, onMessage: (text: string) => void, onClose: (
   };
 }
 
+/** Default, shortest and longest hold, in seconds. */
+const HOLD_TTL = { default: 15, min: 1, max: 60 };
+
 /** The tabs of sessions that ended with `close`, read from agent-browser's files and closed through Chrome's endpoint. */
-function chromeSessionTabs(upstream: string, log: (line: string) => void) {
+function chromeSessionTabs(upstream: string, holds: Holds, log: (line: string) => void) {
   const timeout = () => AbortSignal.timeout(2000);
   return new SessionTabs({
     bindings: () => readBindings(),
@@ -55,6 +61,7 @@ function chromeSessionTabs(upstream: string, log: (line: string) => void) {
       const res = await fetch(`http://${upstream}/json/close/${encodeURIComponent(id)}`, { method: "PUT", signal: timeout() });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
     },
+    held: (id) => holds.has(id),
     log,
   });
 }
@@ -66,7 +73,8 @@ export function startProxy({
   agentBrowser,
   log = () => {},
   keeper = new FocusKeeper(upstream, { log }),
-  sessionTabs = chromeSessionTabs(upstream, log),
+  holds = new Holds(),
+  sessionTabs = chromeSessionTabs(upstream, holds, log),
 }: ProxyOptions) {
   const connections = new Set<Connection>();
   /**
@@ -125,6 +133,24 @@ export function startProxy({
     return json({ targetId, enabled, sessions });
   }
 
+  /** PUT holds a tab, or renews its hold, for `ttl` seconds; DELETE releases it. */
+  function hold(req: Request, url: URL, targetId: string): Response {
+    if (!TARGET_ID.test(targetId)) return json({ error: "expected a Chrome target id (32 hexadecimal digits, upper case)" }, 400);
+    if (req.method === "DELETE") {
+      if (holds.release(targetId)) log(`hold released (${holds.size} held)`);
+      return json({ ok: true, targetId });
+    }
+    const ttl = url.searchParams.get("ttl") ?? String(HOLD_TTL.default);
+    if (!/^\d+$/.test(ttl) || Number(ttl) < HOLD_TTL.min || Number(ttl) > HOLD_TTL.max) {
+      return json({ error: `ttl must be whole seconds from ${HOLD_TTL.min} to ${HOLD_TTL.max}` }, 400);
+    }
+    if (holds.set(targetId, Number(ttl) * 1000)) {
+      for (const c of connections) c.takenOver(targetId);
+      log(`hold set (${holds.size} held)`);
+    }
+    return json({ ok: true, targetId, expiresIn: Number(ttl) });
+  }
+
   const server = Bun.serve<{ path: string; conn?: Connection; created?: Created }>({
     hostname: "127.0.0.1",
     port,
@@ -147,9 +173,11 @@ export function startProxy({
       }
       if (url.pathname === "/__humanize/health") {
         const [targets, ab] = await Promise.all([upstreamTargets(), agentBrowser?.status()]);
-        return json({ ok: true, upstream: targets !== undefined, connections: connections.size, focus: keeper.status(), agentBrowser: ab, stats: snapshot() });
+        return json({ ok: true, upstream: targets !== undefined, connections: connections.size, focus: keeper.status(), holds: holds.size, agentBrowser: ab, stats: snapshot() });
       }
       if (url.pathname === "/__humanize/runtime" && req.method === "POST") return setRuntime(req);
+      const held = /^\/__humanize\/hold\/([^/]+)$/.exec(url.pathname)?.[1];
+      if (held !== undefined && (req.method === "PUT" || req.method === "DELETE")) return hold(req, url, held);
       return new Response("not found", { status: 404 });
     },
     websocket: {
@@ -162,7 +190,7 @@ export function startProxy({
         let conn: Connection | undefined;
         const up = openUpstream(`ws://${upstream}${ws.data.path}`, (text) => conn?.fromUpstream(text), () => conn?.close());
         const created = (ws.data.created = sessionTabs.open());
-        conn = ws.data.conn = new Connection(ws.data.path, client, up, humanizer, keeper, created.add);
+        conn = ws.data.conn = new Connection(ws.data.path, client, up, humanizer, keeper, created.add, (id) => holds.has(id));
         connections.add(conn);
         log(`client connected (${connections.size} open)`);
         void agentBrowser?.refresh();
@@ -179,5 +207,5 @@ export function startProxy({
       },
     },
   });
-  return { server, connections, runtimeTabs };
+  return { server, connections, runtimeTabs, holds };
 }

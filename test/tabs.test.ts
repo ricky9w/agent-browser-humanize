@@ -8,7 +8,7 @@ import { SessionTabs } from "../src/tabs.ts";
 /** A browser with `tabs` open and agent-browser bindings in `bindings`; records the tabs closed. */
 function setup(tabs: string[], bindings: Binding[]) {
   const closed: string[] = [];
-  const state = { tabs: tabs as string[] | undefined, bindings };
+  const state = { tabs: tabs as string[] | undefined, bindings, held: new Set<string>() };
   const sessionTabs = new SessionTabs({
     bindings: async () => state.bindings,
     tabs: async () => state.tabs,
@@ -16,6 +16,7 @@ function setup(tabs: string[], bindings: Binding[]) {
       closed.push(id);
       state.tabs = state.tabs?.filter((t) => t !== id);
     },
+    held: (id) => state.held.has(id),
     delay: 1,
     interval: 60_000,
   });
@@ -82,6 +83,20 @@ describe("SessionTabs", () => {
     created.end();
     await Bun.sleep(20);
     expect(closed).toEqual([]);
+  });
+
+  test("keeps every tab of a group while a person holds one of them, and closes them at a check after the hold", async () => {
+    const { sessionTabs, closed, state } = setup(["T1", "T2"], [{ targetId: "T2", pinned: false }]);
+    state.held.add("T2");
+    const created = sessionTabs.open();
+    created.add("T1");
+    created.add("T2");
+    created.end();
+    await Bun.sleep(20);
+    expect(closed).toEqual([]);
+    state.held.clear();
+    await sessionTabs.check();
+    expect(closed.sort()).toEqual(["T1", "T2"]);
   });
 
   test("does nothing while Chrome does not answer, and forgets tabs that are gone", async () => {

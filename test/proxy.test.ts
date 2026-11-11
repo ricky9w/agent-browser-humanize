@@ -2,7 +2,9 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import { AgentBrowserMonitor } from "../src/agent-browser-check.ts";
 import { FocusKeeper } from "../src/focus.ts";
+import { Holds, TAKEN_OVER } from "../src/hold.ts";
 import { Humanizer } from "../src/humanize.ts";
+import { CLEAR_SOURCE, FOCUS_SOURCE, SCROLL_ELEMENT_SOURCE } from "../src/recognize.ts";
 import { startProxy } from "../src/server.ts";
 import type { Binding } from "../src/sessions.ts";
 import { SessionTabs } from "../src/tabs.ts";
@@ -17,7 +19,9 @@ const sockets: Ws[] = [];
 const keeperReceived: any[] = [];
 const keeperSockets: Ws[] = [];
 let closed = 0;
-const targets = ["T1", "T2", "T3"];
+/** A tab with a target id in Chrome's format, for holds. */
+const TAB = "0123456789ABCDEF0123456789ABCDEF";
+const targets = ["T1", "T2", "T3", TAB];
 /** The keeper's session ids, by target. */
 const keeperSessions = new Map<string, string>();
 /** Chrome's answer to a keeper command; undefined leaves it to the test. */
@@ -57,13 +61,17 @@ const keeper = new FocusKeeper(upstream, { rebuildDelay: 50, timeout: 2000 });
 /** agent-browser's bindings as the proxy reads them, and the tabs it closed. */
 const bindings: Binding[] = [];
 const tabsClosed: string[] = [];
+/** Holds expire on this clock. */
+let now = 0;
+const holds = new Holds(() => now);
 const sessionTabs = new SessionTabs({
   bindings: async () => bindings,
   tabs: async () => targets,
   close: async (id) => void tabsClosed.push(id),
+  held: (id) => holds.has(id),
   delay: 1,
 });
-const { server, connections, runtimeTabs } = startProxy({ port: 0, upstream, humanizer: new Humanizer(fakeClock()), agentBrowser, keeper, sessionTabs });
+const { server, connections, runtimeTabs } = startProxy({ port: 0, upstream, humanizer: new Humanizer(fakeClock()), agentBrowser, keeper, sessionTabs, holds });
 const base = `http://127.0.0.1:${server.port}`;
 afterAll(() => {
   server.stop(true);
@@ -146,6 +154,7 @@ describe("HTTP", () => {
       upstream: true,
       connections: 0,
       focus: { inUse: 0, emulated: 0 },
+      holds: 0,
       agentBrowser: { error: "agent-browser not found at /nonexistent/agent-browser" },
     });
   });
@@ -579,5 +588,185 @@ describe("focus keeper", () => {
     expect(keeperDid()).toEqual(["attach T2", "emulate T2"]);
     expect(keeper.status()).toEqual({ inUse: 0, emulated: 0 });
     expect(await stat("focus.keeper.ended")).toBe(ended + 1);
+  });
+});
+
+describe("holds", () => {
+  const holdUrl = (id: string, ttl?: string) => `${base}/__humanize/hold/${id}${ttl === undefined ? "" : `?ttl=${ttl}`}`;
+  const hold = (id = TAB, ttl?: string) => fetch(holdUrl(id, ttl), { method: "PUT" });
+  const unhold = (id = TAB) => fetch(holdUrl(id), { method: "DELETE" });
+  const refusal = (id: number, sessionId?: string) => ({ id, error: TAKEN_OVER, ...(sessionId ? { sessionId } : {}) });
+  /** A client with page sessions S1 on the held-to-be tab and S2 on T2. */
+  async function client() {
+    const c = await connect();
+    c.emit(attached("S1", TAB, "page"));
+    c.emit(attached("S2", "T2", "page"));
+    await until(() => c.messages.length === 2);
+    return c;
+  }
+  /** The proxy's own commands answered so far: each gets one answer. */
+  const answered = new Set<number>();
+  /** Answers the proxy's own commands with {} until `done`; leaves the ones that arrive after it unanswered. */
+  async function answerUntil(c: Awaited<ReturnType<typeof connect>>, done: () => boolean) {
+    for (let i = 0; i < 500 && !done(); i++) {
+      for (const m of received) {
+        if (m.id < 1_000_000_000 || answered.has(m.id)) continue;
+        answered.add(m.id);
+        c.emit({ id: m.id, result: {}, sessionId: m.sessionId });
+      }
+      await Bun.sleep(2);
+    }
+    expect(done()).toBe(true);
+  }
+
+  beforeEach(() => {
+    holds.release(TAB);
+    answered.clear();
+  });
+
+  test("set, renew, expire and release; health counts the tabs held", async () => {
+    const before = await health();
+    const res = await hold();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, targetId: TAB, expiresIn: 15 });
+    expect((await health()).holds).toBe(1);
+    expect(await (await hold(TAB, "5")).json()).toEqual({ ok: true, targetId: TAB, expiresIn: 5 });
+    now += 4999;
+    expect((await health()).holds).toBe(1);
+    now += 1;
+    expect((await health()).holds).toBe(0);
+    expect((await hold()).status).toBe(200);
+    expect(await (await unhold()).json()).toEqual({ ok: true, targetId: TAB });
+    expect((await unhold()).status).toBe(200);
+    const after = await health();
+    expect(after.holds).toBe(0);
+    const delta = (name: string) => (after.stats[name] ?? 0) - (before.stats[name] ?? 0);
+    expect(["hold.set", "hold.renewed", "hold.expired", "hold.released"].map(delta)).toEqual([2, 1, 1, 1]);
+  });
+
+  test("bad target ids and ttls are refused", async () => {
+    for (const id of ["T1", TAB.toLowerCase(), TAB.slice(1), `${TAB}0`, "%41"]) expect((await hold(id)).status).toBe(400);
+    expect((await unhold("T1")).status).toBe(400);
+    for (const ttl of ["0", "61", "1.5", "-1", "", "abc"]) expect((await hold(TAB, ttl)).status).toBe(400);
+    expect((await hold(TAB, "1")).status).toBe(200);
+    expect((await hold(TAB, "60")).status).toBe(200);
+    expect((await fetch(holdUrl(TAB))).status).toBe(404);
+    expect((await health()).holds).toBe(1);
+  });
+
+  test("actions on a held tab are refused; reads, other tabs and released tabs pass through", async () => {
+    const c = await client();
+    const refused0 = await stat("hold.refused");
+    expect((await hold()).status).toBe(200);
+    const actions = [
+      { method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", x: 10, y: 10 } },
+      { method: "Input.dispatchKeyEvent", params: { type: "keyDown", key: "a" } },
+      { method: "Input.insertText", params: { text: "secret" } },
+      { method: "Input.dispatchTouchEvent", params: { type: "touchStart", touchPoints: [] } },
+      { method: "Input.dispatchDragEvent", params: { type: "dragEnter", x: 1, y: 1, data: { items: [], dragOperationsMask: 1 } } },
+      { method: "Input.synthesizeScrollGesture", params: { x: 1, y: 1 } },
+      { method: "Page.navigate", params: { url: "https://example.com/" } },
+      { method: "Page.reload" },
+      { method: "Page.navigateToHistoryEntry", params: { entryId: 1 } },
+      { method: "Page.close" },
+      { method: "Runtime.callFunctionOn", params: { functionDeclaration: FOCUS_SOURCE, objectId: "o1" } },
+      { method: "Runtime.callFunctionOn", params: { functionDeclaration: CLEAR_SOURCE, objectId: "o1" } },
+      { method: "Runtime.callFunctionOn", params: { functionDeclaration: SCROLL_ELEMENT_SOURCE, objectId: "o1", arguments: [{ value: 0 }, { value: 200 }] } },
+      { method: "Runtime.evaluate", params: { expression: "window.scrollBy(0, 300)" } },
+      { method: "Target.closeTarget", params: { targetId: TAB } },
+    ];
+    actions.forEach((m, i) => c.send({ id: i + 1, ...m, sessionId: "S1" }));
+    // Target.closeTarget naming the held tab, on the browser session.
+    c.send({ id: 50, method: "Target.closeTarget", params: { targetId: TAB } });
+    await until(() => c.messages.length === 2 + actions.length + 1);
+    expect(c.messages.slice(2)).toEqual([...actions.map((_, i) => refusal(i + 1, "S1")), refusal(50)]);
+    expect(await stat("hold.refused")).toBe(refused0 + actions.length + 1);
+
+    const reads = [
+      { id: 60, method: "DOM.getDocument", params: { depth: -1 }, sessionId: "S1" },
+      { id: 61, method: "Accessibility.getFullAXTree", sessionId: "S1" },
+      { id: 62, method: "Page.captureScreenshot", params: { format: "png" }, sessionId: "S1" },
+      { id: 63, method: "Runtime.evaluate", params: { expression: "document.title" }, sessionId: "S1" },
+      { id: 64, method: "Runtime.callFunctionOn", params: { functionDeclaration: "function() { return this.innerText || ''; }", objectId: "o1" }, sessionId: "S1" },
+      { id: 65, method: "Input.dispatchTouchEvent", params: { type: "touchStart", touchPoints: [] }, sessionId: "S2" },
+      { id: 66, method: "Target.closeTarget", params: { targetId: "T2" } },
+    ];
+    for (const m of reads) c.send(m);
+    await until(() => received.length === reads.length);
+    expect(received).toEqual(reads);
+
+    expect((await unhold()).status).toBe(200);
+    c.send({ id: 70, method: "Page.navigate", params: { url: "https://example.com/" }, sessionId: "S1" });
+    await until(() => received.length === reads.length + 1);
+    expect(received.at(-1)).toEqual({ id: 70, method: "Page.navigate", params: { url: "https://example.com/" }, sessionId: "S1" });
+    await c.close();
+  });
+
+  test("typing in progress stops when the hold starts, and the keys it holds down are released", async () => {
+    const c = await client();
+    const interrupted = await stat("hold.interrupted");
+    c.send({ id: 1, method: "Input.insertText", params: { text: "Ab" }, sessionId: "S1" });
+    const down = (key: string) => received.find((m) => m.method === "Input.dispatchKeyEvent" && m.params.type.endsWith("eyDown") && m.params.key === key);
+    await answerUntil(c, () => !!down("A"));
+    expect(down("Shift")).toBeDefined();
+    const sent = received.length;
+    expect((await hold()).status).toBe(200);
+    await until(() => received.length === sent + 2);
+    expect(received.slice(sent).map((m) => `${m.params.type} ${m.params.key} ${m.sessionId}`)).toEqual(["keyUp A S1", "keyUp Shift S1"]);
+    // Chrome answers the key that was on its way; the sequence sends nothing more and the client gets the refusal.
+    c.emit({ id: down("A").id, result: {}, sessionId: "S1" });
+    await until(() => c.messages.length === 3);
+    expect(c.messages[2]).toEqual(refusal(1, "S1"));
+    await Bun.sleep(20);
+    expect(received).toHaveLength(sent + 2);
+    expect(await stat("hold.interrupted")).toBe(interrupted + 1);
+    await c.close();
+  });
+
+  test("a pointer path stops at its next step; a button pressed before the hold is released", async () => {
+    const c = await client();
+    // A press: the pointer travels there along a path, and the button goes down.
+    c.send({ id: 1, method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x: 100, y: 100, button: "left", buttons: 1, clickCount: 1 }, sessionId: "S1" });
+    await answerUntil(c, () => c.messages.length === 3);
+    expect(c.messages[2]).toEqual({ id: 1, result: {}, sessionId: "S1" });
+    const press = received.find((m) => m.params?.type === "mousePressed")!;
+    const sent = received.length;
+    expect((await hold()).status).toBe(200);
+    await until(() => received.length === sent + 1);
+    expect(received[sent]).toMatchObject({ method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x: press.params.x, y: press.params.y, button: "left", buttons: 0 }, sessionId: "S1" });
+    c.send({ id: 2, method: "Input.dispatchMouseEvent", params: { type: "mouseReleased", x: 100, y: 100, button: "left", buttons: 0, clickCount: 1 }, sessionId: "S1" });
+    await until(() => c.messages.length === 4);
+    expect(c.messages[3]).toEqual(refusal(2, "S1"));
+    expect((await unhold()).status).toBe(200);
+
+    // A move on its way when the hold starts.
+    c.send({ id: 3, method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", x: 400, y: 300 }, sessionId: "S1" });
+    const moves = () => received.slice(sent + 1).filter((m) => m.params?.type === "mouseMoved");
+    await answerUntil(c, () => moves().length === 3);
+    const before = received.length;
+    expect((await hold()).status).toBe(200);
+    c.emit({ id: received.at(-1).id, result: {}, sessionId: "S1" });
+    await until(() => c.messages.length === 5);
+    expect(c.messages[4]).toEqual(refusal(3, "S1"));
+    await Bun.sleep(20);
+    expect(received).toHaveLength(before);
+    await c.close();
+  });
+
+  test("the tabs of a session that ended with close stay while one of them is held", async () => {
+    const { messages, send, emit, close } = await connect();
+    send({ id: 7, method: "Target.createTarget", params: { url: "about:blank" } });
+    await until(() => received.length === 1);
+    emit({ id: 7, result: { targetId: TAB } });
+    await until(() => messages.length === 1);
+    bindings.push({ targetId: TAB, pinned: false });
+    expect((await hold()).status).toBe(200);
+    await close();
+    await Bun.sleep(30);
+    expect(tabsClosed).not.toContain(TAB);
+    expect((await unhold()).status).toBe(200);
+    await sessionTabs.check();
+    expect(tabsClosed).toContain(TAB);
+    bindings.length = 0;
   });
 });

@@ -1,6 +1,7 @@
 // One DevTools client connection and its upstream connection to Chrome: session tracking, Runtime hiding, the tabs
-// it uses for focus emulation, background tabs, and routing of input commands to the humanizer. Message bodies are
-// never logged.
+// it uses for focus emulation, background tabs, holds, and routing of input commands to the humanizer. Message bodies
+// are never logged.
+import { Pressed, TAKEN_OVER, isAction } from "./hold.ts";
 import { InputState, type Cdp, type Humanizer } from "./humanize.ts";
 import { count } from "./stats.ts";
 
@@ -34,6 +35,8 @@ class Session {
   /** A page session on which the client sent Page.enable. */
   pageEnabled = false;
   input = new InputState();
+  /** What the proxy pressed on this session and has not released. */
+  pressed = new Pressed();
   queue: Promise<unknown> = Promise.resolve();
   /** `type` is the target's type ("page", "iframe", "worker", ...) when known. */
   constructor(readonly targetId?: string, readonly type?: string) {}
@@ -60,7 +63,7 @@ export class Connection {
   private focusTargets = new Set<string>(); // targets retained with the focus keeper
   private closed = false;
 
-  /** `created` hears of every tab the client creates. */
+  /** `created` hears of every tab the client creates; `held` says whether a person has taken over a tab. */
   constructor(
     path: string,
     private client: Socket,
@@ -68,6 +71,7 @@ export class Connection {
     private humanizer: Humanizer,
     private focus: Focus,
     private created: (targetId: string) => void = () => {},
+    private held: (targetId: string) => boolean = () => false,
   ) {
     const page = /^\/devtools\/page\/([^/?]+)/.exec(path)?.[1];
     this.sessions.set("", new Session(page, page ? "page" : "browser"));
@@ -83,6 +87,12 @@ export class Connection {
     if (typeof msg?.id !== "number" || typeof msg.method !== "string") return this.upstream.send(text);
     const key: string = msg.sessionId ?? "";
     const session = this.session(key);
+    // Actions on a tab a person has taken over wait until they hand it back; reading it goes on.
+    const target = msg.method === "Target.closeTarget" ? msg.params?.targetId : session.targetId;
+    if (typeof target === "string" && this.held(target) && isAction(msg.method, msg.params)) {
+      count("hold.refused");
+      return this.reply(msg, undefined, new CdpError(TAKEN_OVER));
+    }
     if (msg.method === "Runtime.enable" || msg.method === "Runtime.disable") {
       session.wantsRuntime = msg.method === "Runtime.enable";
       count(`${msg.method}.answered`);
@@ -106,12 +116,22 @@ export class Connection {
     }
     const job = this.humanizer.match(msg.method, msg.params);
     if (!job) return this.upstream.send(text);
-    const cdp: Cdp = { send: (method, params) => this.command(key, method, params) };
+    // Input in progress when a hold starts stops at its next step.
+    const cdp: Cdp = {
+      send: (method, params) => {
+        if (session.targetId && this.held(session.targetId)) return Promise.reject(new CdpError(TAKEN_OVER));
+        session.pressed.note(method, params);
+        return this.command(key, method, params);
+      },
+    };
     const run = session.queue.then(() => job(cdp, session.input));
     session.queue = run.catch(() => undefined);
     run.then(
       (result) => this.reply(msg, result),
-      (error) => this.reply(msg, undefined, error),
+      (error) => {
+        if (error instanceof CdpError && error.error === TAKEN_OVER) count("hold.interrupted");
+        this.reply(msg, undefined, error);
+      },
     );
   }
 
@@ -162,6 +182,18 @@ export class Connection {
     else this.runtimeTargets.delete(targetId);
     for (const [key, s] of sessions) this.reconcile(key, s);
     return sessions.length;
+  }
+
+  /**
+   * A person has taken over `targetId`: releases the buttons and keys the proxy holds pressed there, and starts the
+   * input state afresh, since the person moves the pointer.
+   */
+  takenOver(targetId: string) {
+    for (const [key, s] of this.sessions) {
+      if (s.targetId !== targetId) continue;
+      for (const [method, params] of s.pressed.release()) this.command(key, method, params).catch(() => undefined);
+      s.input = new InputState();
+    }
   }
 
   hasTarget(targetId: string) {

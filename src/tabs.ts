@@ -3,6 +3,7 @@
 // creates; once the connection is gone, its tabs are closed if the session's binding says it was closed
 // (`pinned: false`, which only `close` writes) and no binding of a session still pinned names one of them. A session
 // that merely went away (idle shutdown, a crash) keeps `pinned: true`, and its tabs stay for it to come back to.
+// While a person holds one of the tabs, all of them wait for a later check.
 import type { Binding } from "./sessions.ts";
 import { count } from "./stats.ts";
 
@@ -17,6 +18,8 @@ export interface SessionTabsOptions {
   /** Ids of the browser's tabs; undefined when Chrome does not answer. */
   tabs(): Promise<string[] | undefined>;
   close(targetId: string): Promise<void>;
+  /** Whether a person has taken over the tab; its session's tabs are not closed meanwhile. */
+  held?(targetId: string): boolean;
   delay?: number;
   interval?: number;
   log?: (line: string) => void;
@@ -75,6 +78,8 @@ export class SessionTabs {
       const named = bindings.filter((b) => group.tabs.has(b.targetId));
       // No binding: not a pinned agent-browser session; a pinned one: the session may still come back.
       if (group.tabs.size && (!named.length || named.some((b) => b.pinned))) continue;
+      // A person is using one of them: try again at the next check.
+      if ([...group.tabs].some((id) => this.options.held?.(id))) continue;
       this.groups.delete(group);
       if (!group.tabs.size) continue;
       const closing = [...group.tabs].map((id) => this.options.close(id).then(() => 1, () => 0));
