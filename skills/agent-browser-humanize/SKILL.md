@@ -47,6 +47,6 @@ To debug, run `agent-browser-humanize runtime on <session>`. It enables the Runt
 
 - Dialogs stay open. When a command reports an `alert`, `confirm` or leave-page dialog, wait a second or two, then `dialog accept` or `dialog dismiss` as intended.
 - Other sessions and agents may use the browser at the same time. They share its cookies, accounts and download setting: run important actions on one account one after another, and after a download, check that the file arrived and download it again if it did not.
-- For sign-ins, use the credential tool your environment provides; never ask for secrets in chat. Passkeys, SSO prompts and captchas need a person: ask them to take over, naming the site, the tab's title and the step.
+- For sign-ins, use the credential tool your environment provides; never ask for secrets in chat. When a step turns out to need a person, ask them to take over, naming the site, the tab's title and the step.
 - If agent-browser cannot connect (Chrome or the proxy is not running), report it. Do not fall back to headless or start another browser.
 - Whether a site lets you in also depends on the network and the account, which the proxy does not change. If you are blocked, report it. Do not change the User-Agent or other identity settings: that only makes the browser inconsistent.
