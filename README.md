@@ -17,7 +17,7 @@ Bun and TypeScript, no runtime dependencies. agent-browser-humanize is an indepe
 ## Requirements
 
 - [Bun](https://bun.sh) 1.4.4 or later.
-- agent-browser 0.41.x. The proxy recognizes some of agent-browser's page functions by their exact source, copied from 0.41.2; the [self-check](#agent-browser-self-check) tells you when the installed agent-browser no longer contains them.
+- agent-browser 0.42.x. The proxy recognizes some of agent-browser's page functions by their exact source, copied from 0.42.0; the [self-check](#agent-browser-self-check) tells you when the installed agent-browser no longer contains them.
 - Google Chrome or Chromium with remote debugging. Developed against Chrome 157.
 - Tested on macOS. Nothing in the proxy is specific to macOS, and for a Chrome on Linux it sends the Linux select-all shortcut, but it has not been tested on Linux. Windows is untested.
 
@@ -199,7 +199,7 @@ All coordinates the proxy sends are integers. Every delay and position is drawn 
 
 ### Recognized page functions
 
-agent-browser 0.41.2's page functions, recognized by their exact source from `cli/src/native/interaction.rs` (only whitespace is normalized):
+agent-browser 0.42.0's page functions, recognized by their exact source from `cli/src/native/interaction.rs` (only whitespace is normalized):
 
 - `function() { this.focus(); }` (`fill`, `type <sel>`, `focus`): for a text field (`<input>` of a text type, `<textarea>`, an element with `contenteditable`), a click into the field as above: `DOM.describeNode({objectId})`, then box, aim, path, press and release. If no point in the field is hittable, the proxy calls `DOM.scrollIntoViewIfNeeded` and tries again, and otherwise runs the original call. A `DOM.focus` afterwards keeps the original effect if the click did not focus the field. The client is answered as if the call had run. Other elements (buttons, links) keep the original `focus()`, because a click would activate them.
 - The clear function of `fill` and `type --clear` (select, `value = ''`, untrusted `input` event): select-all with real key events, then Backspace. Select-all follows the platform Chrome runs on, which can differ from the proxy's: the proxy reads it once from the `User-Agent` of the upstream's `/json/version` (`Macintosh` on macOS, which Chrome's reduced User-Agent still names) and asks again later while Chrome does not answer, assuming its own platform meanwhile. On macOS it sends `Meta+A` with `commands: ["selectAll"]`, because Chrome takes the editing command for a shortcut from the OS there, which CDP key events bypass. Elsewhere it sends `Control+A`, which Chrome maps to select-all itself.
@@ -232,7 +232,7 @@ Agent tabs never change what is on screen. With focus emulation they need not be
 
 ### Tabs of ended sessions
 
-On a Chrome it did not start (`--cdp`, `--auto-connect`), agent-browser's `close` disconnects and leaves every tab the session opened; agent-browser 0.41.2 does not track which tabs it created. The proxy closes them:
+On a Chrome it did not start (`--cdp`, `--auto-connect`), agent-browser's `close` disconnects and leaves every tab the session opened; agent-browser 0.42.0 does not track which tabs it created. The proxy closes them:
 
 - It notes the tabs each client connection creates, from Chrome's answers to `Target.createTarget`.
 - A few seconds after a connection closes, it reads agent-browser's session bindings (`<session>.target` in agent-browser's session directory, `AGENT_BROWSER_SOCKET_DIR`, `$XDG_RUNTIME_DIR/agent-browser` or `~/.agent-browser`, and in `namespaces/*/run` below it). When a binding names one of the connection's tabs with `pinned: false`, and no binding with `pinned: true` names any of them, it closes all of the connection's tabs, the ones the session switched away from with `tab new` included. Only `close` writes `pinned: false`.
@@ -287,7 +287,7 @@ agent-browser can also get its CDP URL from a `browser.provider` plugin. In 0.41
 ## Known limits
 
 - agent-browser's own page script stays as it is: snapshots, the hit test before a click, `select`, `check`, `get`, `is` and `eval` still run in the page (main world).
-- Recognition is tied to agent-browser 0.41.2's exact function sources. After an upgrade that changes them, `fill` focuses and clears from page script again (and still types), and `scroll` uses `scrollBy`. Such a mismatch shows in `/__humanize/health` and as a `WARNING` in the log. The self-check only finds the sources in the binary; it cannot tell whether agent-browser still calls them the same way.
+- Recognition is tied to agent-browser 0.42.0's exact function sources. After an upgrade that changes them, `fill` focuses and clears from page script again (and still types), and `scroll` uses `scrollBy`. Such a mismatch shows in `/__humanize/health` and as a `WARNING` in the log. The self-check only finds the sources in the binary; it cannot tell whether agent-browser still calls them the same way.
 - A US keyboard layout is assumed. Characters it has no key for are inserted as text.
 - Select-all follows the `User-Agent` Chrome reports in `/json/version`. A Chrome started with a `--user-agent` that names another platform gets that platform's shortcut.
 - `keyboard inserttext`, meant to insert without key events, looks the same as `fill`'s insert at the CDP level and is typed too when it has at most 120 characters.
@@ -298,7 +298,7 @@ agent-browser can also get its CDP URL from a `browser.provider` plugin. In 0.41
 - Every emulated tab reports focus, so several tabs report focus at the same time, which a person's browser never does.
 - A tab is emulated while any connected session has `Page` enabled on it, and that is more tabs than the sessions' own: the first existing tab a session enables domains on when it connects (often another session's or a person's), and every tab opened in Chrome while a session is connected, because agent-browser attaches to new tabs and enables `Page` on them without switching to them. Such a tab stays emulated until the last of those sessions has let go of it; one session ending does not take the focus from tabs other sessions still use.
 - While the focus keeper reconnects (about a second, after its connection dropped with Chrome still running), background tabs in use report hidden and unfocused.
-- Closing the tabs of ended sessions relies on the session files of agent-browser 0.41.2. If a later version changes them, the proxy stops closing tabs; it never closes tabs it cannot attribute to a closed session.
+- Closing the tabs of ended sessions relies on the session files of agent-browser 0.42.0. If a later version changes them, the proxy stops closing tabs; it never closes tabs it cannot attribute to a closed session.
 - The proxy notes tabs in memory. Tabs created before it started, or before it restarted, stay open after their session's `close`.
 - After `close`, a session name that is used again finds its tab gone (`tab_gone`) and needs `tab new <url>`.
 - A session that switched to a tab it did not create (`tab <tab>`) and then ended with `close` leaves its own tabs open, because its binding names the other tab.

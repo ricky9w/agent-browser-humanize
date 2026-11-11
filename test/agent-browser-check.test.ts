@@ -25,7 +25,7 @@ const windowScroll = "window.scrollBy(";
 const ALL = [FOCUS_SOURCE, typeClear, SCROLL_ELEMENT_SOURCE, windowScroll];
 
 /** An executable stand-in for the binary: a shell script that prints a version, then binary bytes and the given strings. */
-function fakeBinary(path: string, sources: string[], version = "0.41.2") {
+function fakeBinary(path: string, sources: string[], version = "0.42.0") {
   const script = Buffer.from(`#!/bin/sh\necho "agent-browser ${version}"\nexit 0\n`);
   const junk = Buffer.from([0, 0xcf, 0xfa, 0xed, 0xfe, 0x80, 0xff, 0]);
   writeFileSync(path, Buffer.concat([script, ...sources.flatMap((s) => [junk, Buffer.from(s, "latin1")]), junk]), { mode: 0o755 });
@@ -41,8 +41,8 @@ describe("agent-browser self-check", () => {
   test("all sources present, the clear function with different indentation", async () => {
     const path = fakeBinary(join(newDir(), "agent-browser"), ALL);
     const { m, lines } = monitor({ AGENT_BROWSER_HUMANIZE_AGENT_BROWSER: path });
-    expect(await m.status()).toEqual({ path, version: "0.41.2", recognizers: { focus: true, clear: true, scrollElement: true, scrollWindow: true } });
-    expect(lines).toEqual([`agent-browser 0.41.2 at ${path}: all 4 recognized page functions found`]);
+    expect(await m.status()).toEqual({ path, version: "0.42.0", recognizers: { focus: true, clear: true, scrollElement: true, scrollWindow: true } });
+    expect(lines).toEqual([`agent-browser 0.42.0 at ${path}: all 4 recognized page functions found`]);
   });
 
   test("some missing: a warning names them and what falls back", async () => {
@@ -63,7 +63,7 @@ describe("agent-browser self-check", () => {
     const native = fakeBinary(join(dir, "lib", `agent-browser-${process.platform}-${process.arch}`), ALL);
     expect(await locateAgentBrowser({ PATH: `${newDir()}:${join(dir, "bin")}` })).toBe(native);
     const { m } = monitor({ PATH: join(dir, "bin") });
-    expect(await m.status()).toMatchObject({ path: native, version: "0.41.2" });
+    expect(await m.status()).toMatchObject({ path: native, version: "0.42.0" });
   });
 
   test("a symlink to the native binary resolves to it", async () => {

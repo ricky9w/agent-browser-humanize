@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { recognize } from "../src/recognize.ts";
 
-// Verbatim from agent-browser 0.41.2 cli/src/native/interaction.rs, with the indentation each call site uses.
+// Verbatim from agent-browser 0.42.0 cli/src/native/interaction.rs, with the indentation each call site uses.
 const fillClear = `function() {
                     this.select && this.select();
                     this.value = '';
@@ -20,7 +20,7 @@ const clearCommand = `function() {
                 }`;
 const call = (functionDeclaration: string, extra: object = {}) => ({ functionDeclaration, objectId: "o1", returnByValue: true, awaitPromise: false, ...extra });
 
-describe("agent-browser 0.41.2 functions", () => {
+describe("agent-browser 0.42.0 functions", () => {
   test("focus (fill, type, focus)", () => {
     expect(recognize("Runtime.callFunctionOn", call("function() { this.focus(); }"))).toEqual({ kind: "focus", objectId: "o1" });
   });

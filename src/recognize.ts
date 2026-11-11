@@ -1,4 +1,4 @@
-// Recognises agent-browser 0.41.2's own page JS by its exact source (cli/src/native/interaction.rs).
+// Recognises agent-browser 0.42.0's own page JS by its exact source (cli/src/native/interaction.rs).
 // Only whitespace is normalised, because the same function appears with different indentation.
 // Anything else, including these functions from a different agent-browser version, passes through.
 // RECOGNIZERS lists what the self-check (agent-browser-check.ts) looks for in the installed agent-browser binary.
