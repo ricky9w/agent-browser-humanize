@@ -1,0 +1,66 @@
+name: release
+
+# Pushing a tag v<version> on main, where <version> is the one in package.json, checks that commit and
+# attaches agent-browser-humanize-<version>.tar.gz to the tag's GitHub Release. The tarball holds what
+# runs (bin/, src/, package.json; no runtime dependencies), the skill, README.md and LICENSE.
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    # A public repository: GitHub-hosted, never a self-hosted runner.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # engines.bun is a minimum, not a pin: check against the current Bun.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - id: verify
+        run: |
+          version="$(bun -e 'console.log((await Bun.file("package.json").json()).version)')"
+          [ "$GITHUB_REF_NAME" = "v$version" ] ||
+            { echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"; exit 1; }
+          git merge-base --is-ancestor HEAD origin/main ||
+            { echo "::error::$GITHUB_REF_NAME is not on main"; exit 1; }
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun test
+
+      - name: Pack
+        env:
+          VERSION: ${{ steps.verify.outputs.version }}
+        run: |
+          name="agent-browser-humanize-$VERSION"
+          mkdir -p "$RUNNER_TEMP/stage/$name" "$RUNNER_TEMP/out" "$RUNNER_TEMP/try"
+          cp -R bin src skills package.json README.md LICENSE "$RUNNER_TEMP/stage/$name/"
+          tar -czf "$RUNNER_TEMP/out/$name.tar.gz" -C "$RUNNER_TEMP/stage" "$name"
+          # The packed command runs and reports this version.
+          tar -xzf "$RUNNER_TEMP/out/$name.tar.gz" -C "$RUNNER_TEMP/try"
+          [ "$("$RUNNER_TEMP/try/$name/bin/agent-browser-humanize" --version)" = "$VERSION" ]
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.verify.outputs.version }}
+        run: |
+          file="$RUNNER_TEMP/out/agent-browser-humanize-$VERSION.tar.gz"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$file" --clobber
+          else
+            prerelease=()
+            [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
+            gh release create "$GITHUB_REF_NAME" "$file" --verify-tag --generate-notes "${prerelease[@]}"
+          fi
