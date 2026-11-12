@@ -127,7 +127,8 @@ async function runtime(args: string[], env: Env) {
   } catch (error) {
     throw new UsageError((error as Error).message);
   }
-  const [mode, session, ...rest] = positionals;
+  // Without a name, the session the environment names, as agent-browser itself does.
+  const [mode, session = env.AGENT_BROWSER_SESSION, ...rest] = positionals;
   if ((mode !== "on" && mode !== "off") || !session || rest.length) throw new UsageError();
   if (!SESSION_NAME.test(session)) throw new Failure(`invalid session name: ${session}`);
   const config = await agentBrowserConfig(env);

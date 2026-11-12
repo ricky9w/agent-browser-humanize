@@ -171,6 +171,7 @@ describe("command line", () => {
     bind("abh-s", "T1");
     const env = { AGENT_BROWSER_HUMANIZE_PORT: String(server.port) };
     expect(await cli(["runtime", "off", "abh-s"], env)).toEqual({ stdout: "Runtime off for abh-s: turned off in 0 tabs", stderr: "", code: 0 });
+    expect(await cli(["runtime", "off"], { ...env, AGENT_BROWSER_SESSION: "abh-s" })).toEqual({ stdout: "Runtime off for abh-s: turned off in 0 tabs", stderr: "", code: 0 });
     expect(await cli(["runtime", "on", "abh-s"], env)).toEqual({ stdout: "", stderr: "agent-browser-humanize: the tab is gone (session abh-s, tab T1)", code: 1 });
   });
 
