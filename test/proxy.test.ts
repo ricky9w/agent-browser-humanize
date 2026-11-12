@@ -7,7 +7,7 @@ import { Humanizer } from "../src/humanize.ts";
 import { CLEAR_SOURCE, FOCUS_SOURCE, SCROLL_ELEMENT_SOURCE } from "../src/recognize.ts";
 import { startProxy } from "../src/server.ts";
 import type { Binding } from "../src/sessions.ts";
-import { SessionTabs } from "../src/tabs.ts";
+import { TabLeases } from "../src/tabs.ts";
 import { fakeClock } from "./helpers.ts";
 
 // A fake Chrome: discovery endpoints plus WebSockets that record what they receive. Only the focus keeper connects to
@@ -64,14 +64,13 @@ const tabsClosed: string[] = [];
 /** Holds expire on this clock. */
 let now = 0;
 const holds = new Holds(() => now);
-const sessionTabs = new SessionTabs({
+const tabs = new TabLeases({
   bindings: async () => bindings,
   tabs: async () => targets,
   close: async (id) => void tabsClosed.push(id),
   held: (id) => holds.has(id),
-  delay: 1,
 });
-const { server, connections, runtimeTabs } = startProxy({ port: 0, upstream, humanizer: new Humanizer(fakeClock()), agentBrowser, keeper, sessionTabs, holds });
+const { server, connections, runtimeTabs } = startProxy({ port: 0, upstream, humanizer: new Humanizer(fakeClock()), agentBrowser, keeper, tabs, holds });
 const base = `http://127.0.0.1:${server.port}`;
 afterAll(() => {
   server.stop(true);
@@ -83,10 +82,11 @@ const until = async (check: () => boolean) => {
   expect(check()).toBe(true);
 };
 
-async function connect(path = "/devtools/browser/abc") {
+async function connect(path = "/devtools/browser/abc", owner?: string) {
   const messages: any[] = [];
   const before = sockets.length;
-  const ws = new WebSocket(`ws://127.0.0.1:${server.port}${path}`);
+  // Bun's WebSocket takes headers, as agent-browser sends them with `--cdp-headers`.
+  const ws = new WebSocket(`ws://127.0.0.1:${server.port}${path}`, (owner ? { headers: { "x-humanize-owner": owner } } : undefined) as any);
   ws.onmessage = (e) => messages.push(JSON.parse(String(e.data)));
   await new Promise((resolve) => (ws.onopen = resolve));
   await until(() => sockets.length > before);
@@ -324,17 +324,33 @@ describe("WebSocket", () => {
     await close();
   });
 
-  test("tabs a client created are closed after its session ended with close", async () => {
-    const { messages, send, emit, close } = await connect();
+  test("tabs a client created, and tabs its pages open, belong to the owner it named; the control API ends or renews its lease", async () => {
+    const { messages, send, emit, close } = await connect("/devtools/browser/abc", "pa-one");
     send({ id: 7, method: "Target.createTarget", params: { url: "about:blank" } });
     await until(() => received.length === 1);
     emit({ id: 7, result: { targetId: "T3" } });
-    await until(() => messages.length === 1);
+    emit({ method: "Target.targetCreated", params: { targetInfo: { targetId: "T4", type: "page", openerId: "T3" } } });
+    emit({ method: "Target.targetCreated", params: { targetInfo: { targetId: "T5", type: "page", openerId: "T1" } } });
+    await until(() => messages.length === 3);
     expect(messages[0]).toEqual({ id: 7, result: { targetId: "T3" } });
-    bindings.push({ targetId: "T3", pinned: false });
     await close();
-    await until(() => tabsClosed.includes("T3"));
-    bindings.length = 0;
+    targets.push("T3", "T4", "T5");
+    const lease = (method: string, owner: string) => fetch(`${base}/__humanize/lease/${owner}`, { method }).then((res) => res.json() as Promise<any>);
+    expect(await lease("PUT", "pa-one")).toEqual({ ok: true, owner: "pa-one", tabs: 2, expiresIn: 3600 });
+    expect(await lease("PUT", "pa-other")).toMatchObject({ tabs: 0 });
+    expect((await fetch(`${base}/__humanize/lease/a%20b`, { method: "PUT" })).status).toBe(400);
+    await tabs.check();
+    expect(tabsClosed).toEqual([]);
+    expect(await lease("DELETE", "pa-one")).toMatchObject({ tabs: 2 });
+    await until(() => tabsClosed.length === 2);
+    expect(tabsClosed.sort()).toEqual(["T3", "T4"]);
+    targets.splice(-3);
+    tabsClosed.length = 0;
+  });
+
+  test("an owner's name must be a session name", async () => {
+    const res = await fetch(`${base}/devtools/browser/abc`, { headers: { upgrade: "websocket", connection: "Upgrade", "x-humanize-owner": "a b", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==", "sec-websocket-version": "13" } });
+    expect(res.status).toBe(400);
   });
 
   test("Page.bringToFront is answered locally; Target.activateTarget passes through", async () => {
@@ -753,20 +769,21 @@ describe("holds", () => {
     await c.close();
   });
 
-  test("the tabs of a session that ended with close stay while one of them is held", async () => {
-    const { messages, send, emit, close } = await connect();
+  test("a released owner's tabs stay while a person holds one of them", async () => {
+    const { messages, send, emit, close } = await connect("/devtools/browser/abc", "pa-held");
     send({ id: 7, method: "Target.createTarget", params: { url: "about:blank" } });
     await until(() => received.length === 1);
     emit({ id: 7, result: { targetId: TAB } });
     await until(() => messages.length === 1);
-    bindings.push({ targetId: TAB, pinned: false });
+    targets.push(TAB);
     expect((await hold()).status).toBe(200);
     await close();
-    await Bun.sleep(30);
+    await fetch(`${base}/__humanize/lease/pa-held`, { method: "DELETE" });
+    await tabs.check();
     expect(tabsClosed).not.toContain(TAB);
     expect((await unhold()).status).toBe(200);
-    await sessionTabs.check();
-    expect(tabsClosed).toContain(TAB);
-    bindings.length = 0;
+    await fetch(`${base}/__humanize/lease/pa-held`, { method: "DELETE" });
+    await until(() => tabsClosed.includes(TAB));
+    targets.pop();
   });
 });

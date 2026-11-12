@@ -1,12 +1,13 @@
 // HTTP and WebSocket front of the proxy: discovery endpoints, the control API, and one Connection per client socket.
+import { join } from "node:path";
 import type { AgentBrowserMonitor } from "./agent-browser-check.ts";
 import { Connection, type Socket } from "./connection.ts";
 import { FocusKeeper } from "./focus.ts";
 import { Holds, TARGET_ID } from "./hold.ts";
 import type { Humanizer } from "./humanize.ts";
-import { readBindings } from "./sessions.ts";
 import { snapshot } from "./stats.ts";
-import { SessionTabs, type Created } from "./tabs.ts";
+import { readBindings, sessionDir } from "./sessions.ts";
+import { LEASE_MS, TabLeases } from "./tabs.ts";
 
 export interface ProxyOptions {
   /** Port to listen on (127.0.0.1); 0 picks a free one. */
@@ -18,8 +19,8 @@ export interface ProxyOptions {
   agentBrowser?: AgentBrowserMonitor;
   /** The owner of focus emulation; one on `upstream` by default. */
   keeper?: FocusKeeper;
-  /** Closes the tabs of sessions that ended with `close`; one on `upstream` and agent-browser's files by default. */
-  sessionTabs?: SessionTabs;
+  /** Owns the tabs clients create; one on `upstream`, kept beside agent-browser's session files, by default. */
+  tabs?: TabLeases;
   /** The tabs a person has taken over. */
   holds?: Holds;
   log?: (line: string) => void;
@@ -48,10 +49,14 @@ function openUpstream(url: string, onMessage: (text: string) => void, onClose: (
 /** Default, shortest and longest hold, in seconds. */
 const HOLD_TTL = { default: 15, min: 1, max: 60 };
 
-/** The tabs of sessions that ended with `close`, read from agent-browser's files and closed through Chrome's endpoint. */
-function chromeSessionTabs(upstream: string, holds: Holds, log: (line: string) => void) {
+/** The header a client names its owner in; a client without one is an owner of its own for as long as it is connected. */
+export const OWNER_HEADER = "x-humanize-owner";
+
+/** The tabs clients create in the Chrome at `upstream`, closed through Chrome's endpoint. */
+function chromeTabs(upstream: string, holds: Holds, log: (line: string) => void) {
   const timeout = () => AbortSignal.timeout(2000);
-  return new SessionTabs({
+  return new TabLeases({
+    file: join(sessionDir(), "humanize-tabs.json"),
     bindings: () => readBindings(),
     tabs: async () => {
       const res = await fetch(`http://${upstream}/json/list`, { signal: timeout() }).catch(() => undefined);
@@ -74,7 +79,7 @@ export function startProxy({
   log = () => {},
   keeper = new FocusKeeper(upstream, { log }),
   holds = new Holds(),
-  sessionTabs = chromeSessionTabs(upstream, holds, log),
+  tabs = chromeTabs(upstream, holds, log),
 }: ProxyOptions) {
   const connections = new Set<Connection>();
   /**
@@ -151,7 +156,16 @@ export function startProxy({
     return json({ ok: true, targetId, expiresIn: Number(ttl) });
   }
 
-  const server = Bun.serve<{ path: string; conn?: Connection; created?: Created }>({
+  /** PUT keeps an owner's tabs for another lease; DELETE closes them now. */
+  function lease(req: Request, owner: string): Response {
+    if (!SESSION_NAME.test(owner)) return json({ error: "expected an owner: letters, digits, _ and -, at most 128 characters" }, 400);
+    if (req.method === "DELETE") return json({ ok: true, owner, tabs: tabs.release(owner) });
+    return json({ ok: true, owner, tabs: tabs.renew(owner), expiresIn: LEASE_MS / 1000 });
+  }
+
+  tabs.start();
+  void tabs.check();
+  const server = Bun.serve<{ path: string; owner: string; conn?: Connection }>({
     hostname: "127.0.0.1",
     port,
     async fetch(req, server) {
@@ -162,7 +176,10 @@ export function startProxy({
         return new Response("forbidden", { status: 403 });
       }
       if (url.pathname.startsWith("/devtools/")) {
-        return server.upgrade(req, { data: { path: url.pathname + url.search } }) ? undefined : new Response("upgrade failed", { status: 400 });
+        const named = req.headers.get(OWNER_HEADER);
+        if (named !== null && !SESSION_NAME.test(named)) return new Response(`invalid ${OWNER_HEADER}`, { status: 400 });
+        const owner = named ?? `connection-${crypto.randomUUID()}`;
+        return server.upgrade(req, { data: { path: url.pathname + url.search, owner } }) ? undefined : new Response("upgrade failed", { status: 400 });
       }
       if (url.pathname === "/json" || url.pathname.startsWith("/json/")) {
         const res = await fetch(`http://${upstream}${url.pathname}${url.search}`, { method: req.method }).catch(() => undefined);
@@ -173,11 +190,13 @@ export function startProxy({
       }
       if (url.pathname === "/__humanize/health") {
         const [targets, ab] = await Promise.all([upstreamTargets(), agentBrowser?.status()]);
-        return json({ ok: true, upstream: targets !== undefined, connections: connections.size, focus: keeper.status(), holds: holds.size, agentBrowser: ab, stats: snapshot() });
+        return json({ ok: true, upstream: targets !== undefined, connections: connections.size, focus: keeper.status(), holds: holds.size, tabs: tabs.size, agentBrowser: ab, stats: snapshot() });
       }
       if (url.pathname === "/__humanize/runtime" && req.method === "POST") return setRuntime(req);
       const held = /^\/__humanize\/hold\/([^/]+)$/.exec(url.pathname)?.[1];
       if (held !== undefined && (req.method === "PUT" || req.method === "DELETE")) return hold(req, url, held);
+      const leased = /^\/__humanize\/lease\/([^/]+)$/.exec(url.pathname)?.[1];
+      if (leased !== undefined && (req.method === "PUT" || req.method === "DELETE")) return lease(req, decodeURIComponent(leased));
       return new Response("not found", { status: 404 });
     },
     websocket: {
@@ -189,8 +208,9 @@ export function startProxy({
         const client: Socket = { send: (text) => void ws.send(text), close: () => ws.close() };
         let conn: Connection | undefined;
         const up = openUpstream(`ws://${upstream}${ws.data.path}`, (text) => conn?.fromUpstream(text), () => conn?.close());
-        const created = (ws.data.created = sessionTabs.open());
-        conn = ws.data.conn = new Connection(ws.data.path, client, up, humanizer, keeper, created.add, (id) => holds.has(id));
+        const { owner } = ws.data;
+        const events = { created: (id: string) => tabs.add(id, owner), opened: (id: string, opener: string) => tabs.adopt(id, opener), used: (id: string) => tabs.used(id) };
+        conn = ws.data.conn = new Connection(ws.data.path, client, up, humanizer, keeper, events, (id) => holds.has(id));
         connections.add(conn);
         log(`client connected (${connections.size} open)`);
         void agentBrowser?.refresh();
@@ -202,10 +222,11 @@ export function startProxy({
         const conn = ws.data.conn;
         if (!conn || !connections.delete(conn)) return;
         conn.close();
-        ws.data.created?.end();
+        // A session that ended with `close` writes its binding after it disconnects.
+        setTimeout(() => void tabs.check(), 3000).unref?.();
         log(`client disconnected (${connections.size} open)`);
       },
     },
   });
-  return { server, connections, runtimeTabs, holds };
+  return { server, connections, runtimeTabs, holds, tabs };
 }

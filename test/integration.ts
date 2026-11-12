@@ -355,6 +355,21 @@ async function endedSessions() {
   check("a session that shut down idle keeps its tab and comes back to it", kept && back.code === 0 && (await pinnedTab(idle)) === tab, back.out.slice(0, 120));
   await abAs(idle, "close");
   check("and its tab is closed once it ends with close", Boolean(tab) && (await gone([tab!])));
+
+  // A named owner: the tab its page opens is its own too, and the end of its lease closes both.
+  const owned = `${session}-owned`;
+  const asOwner = (...args: string[]) => run([agentBrowser, "--session", owned, "--cdp", port, ...args], { AGENT_BROWSER_CDP_HEADERS: JSON.stringify({ "X-Humanize-Owner": owned }) });
+  const before = await pages();
+  await asOwner("open", `data:text/html,<a id=l target=_blank href="${probeUrl(`${tag}-d`)}">open</a>`);
+  await asOwner("click", "#l");
+  await Bun.sleep(1500);
+  const mine = (await pages()).filter((id) => !before.includes(id));
+  const lease = (method: string) => fetch(`http://127.0.0.1:${port}/__humanize/lease/${owned}`, { method }).then((res) => res.json() as Promise<{ tabs: number }>);
+  const renewed = await lease("PUT");
+  check("a tab a page opens belongs to the owner of the tab that opened it", mine.length === 2 && renewed.tabs === 2, `${mine.length} new tab(s), ${renewed.tabs} owned`);
+  await lease("DELETE");
+  check("ending an owner's lease closes its tabs", mine.length > 0 && (await gone(mine)));
+  await asOwner("close");
 }
 
 async function backgroundTab() {

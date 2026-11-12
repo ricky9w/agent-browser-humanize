@@ -19,7 +19,7 @@ export interface Focus {
 /** Ids of the proxy's own commands. agent-browser counts its ids up from 1. */
 const FIRST_PROXY_ID = 1_000_000_000;
 /** Events that change which session belongs to which target. */
-const TARGET_EVENTS = new Set(["Target.attachedToTarget", "Target.detachedFromTarget", "Target.targetDestroyed"]);
+const TARGET_EVENTS = new Set(["Target.attachedToTarget", "Target.detachedFromTarget", "Target.targetDestroyed", "Target.targetCreated"]);
 
 export class CdpError extends Error {
   constructor(readonly error: { code: number; message: string }) {
@@ -53,6 +53,13 @@ interface Pending {
   reject(error: Error): void;
 }
 
+/** What the connection reports about tabs. */
+export interface TabEvents {
+  created?(targetId: string): void;
+  opened?(targetId: string, openerId: string): void;
+  used?(targetId: string): void;
+}
+
 export class Connection {
   private nextId = FIRST_PROXY_ID;
   private pending = new Map<number, Pending>();
@@ -63,14 +70,17 @@ export class Connection {
   private focusTargets = new Set<string>(); // targets retained with the focus keeper
   private closed = false;
 
-  /** `created` hears of every tab the client creates; `held` says whether a person has taken over a tab. */
+  /**
+   * `tabs` hears of every tab the client creates (`created`), of tabs its pages open themselves (`opened`, with the
+   * tab that opened them) and of every tab it uses; `held` says whether a person has taken over a tab.
+   */
   constructor(
     path: string,
     private client: Socket,
     private upstream: Socket,
     private humanizer: Humanizer,
     private focus: Focus,
-    private created: (targetId: string) => void = () => {},
+    private tabs: TabEvents = {},
     private held: (targetId: string) => boolean = () => false,
   ) {
     const page = /^\/devtools\/page\/([^/?]+)/.exec(path)?.[1];
@@ -87,6 +97,7 @@ export class Connection {
     if (typeof msg?.id !== "number" || typeof msg.method !== "string") return this.upstream.send(text);
     const key: string = msg.sessionId ?? "";
     const session = this.session(key);
+    if (session.targetId) this.tabs.used?.(session.targetId);
     // Actions on a tab a person has taken over wait until they hand it back; reading it goes on.
     const target = msg.method === "Target.closeTarget" ? msg.params?.targetId : session.targetId;
     if (typeof target === "string" && this.held(target) && isAction(msg.method, msg.params)) {
@@ -135,6 +146,10 @@ export class Connection {
     );
   }
 
+  private opened(info: { targetId?: unknown; type?: unknown; openerId?: unknown } | undefined) {
+    if (info?.type === "page" && typeof info.targetId === "string" && typeof info.openerId === "string") this.tabs.opened?.(info.targetId, info.openerId);
+  }
+
   fromUpstream(text: string) {
     // Most traffic is forwarded without parsing: Chrome writes "id" or "method" first.
     const head = text.slice(0, 80);
@@ -155,7 +170,7 @@ export class Connection {
         return msg.error ? pending.reject(new CdpError(msg.error)) : pending.resolve(msg.result ?? {});
       }
       if (this.creating.delete(msg.id)) {
-        if (typeof msg.result?.targetId === "string") this.created(msg.result.targetId);
+        if (typeof msg.result?.targetId === "string") this.tabs.created?.(msg.result.targetId);
         return this.client.send(text);
       }
       // Chrome sends Target.attachedToTarget, with the target's type, before this response; keep that session.
@@ -163,8 +178,11 @@ export class Connection {
       this.attaching.delete(msg.id);
       const sessionId = msg.result?.sessionId;
       if (targetId && typeof sessionId === "string" && !this.sessions.has(sessionId)) this.sessions.set(sessionId, new Session(targetId));
+    } else if (msg.method === "Target.targetCreated") {
+      this.opened(msg.params?.targetInfo);
     } else if (msg.method === "Target.attachedToTarget") {
       const { sessionId, targetInfo } = msg.params ?? {};
+      this.opened(targetInfo);
       if (typeof sessionId === "string") this.sessions.set(sessionId, new Session(targetInfo?.targetId, targetInfo?.type));
     } else if (msg.method === "Target.detachedFromTarget") {
       this.drop(msg.params?.sessionId);

@@ -11,17 +11,15 @@ This assumes the setup from the project README: agent-browser's `cdp` points at 
 
 ## Sessions and tabs
 
-- Give each task a session name that no other task or agent will use: a short prefix for yourself, the task and a random suffix, such as `--session cc-invoice-7k2q`. Pass it on every command. Sessions with the same name share one tab.
+- When your environment names the session for you (`AGENT_BROWSER_SESSION` is set), never pass `--session`. Otherwise give each task a session name that no other task or agent will use: a short prefix for yourself, the task and a random suffix, such as `--session cc-invoice-7k2q`, and pass it on every command. Sessions with the same name share one tab.
 - `open <url>` opens a new tab for the session and pins the session to it. Other sessions' tabs and people's tabs are left alone.
 - A session acts on one tab at a time. `tab new <url>` and `tab <tab>` switch to another tab and move the pin. Label extra tabs to tell them apart: `tab new --label docs <url>`, then `tab docs`.
 - Tabs open in the background, and the proxy keeps your tabs visible and focused for the page. You never need to bring a tab to the front.
 - A link or script that opens a new tab does not switch the session. List the tabs with `tab` and switch to it.
 - Refs belong to one tab: run `snapshot -i` again after switching.
 - `tab` lists every tab in the browser. Switch only to tabs your task opened.
-- `tab_gone` means your tab was closed. Open a new one with `tab new <url>`; never take over another tab.
-- When done, run `close`. The proxy then closes every tab the session opened; Chrome keeps running.
-- To keep a tab for later, or while a person works in it, leave the session open and do not run `close`. A session left idle shuts down after an hour, but keeps its tab and comes back to it under the same name.
-- After `close`, use a new session name for more work; the old name's tab is gone (`tab_gone`).
+- You do not clean up. The proxy closes your tabs once you have not used them for an hour; tabs you are still using, and tabs a person is working in, stay. `close` closes them at once and is optional.
+- `tab_gone` means your tab is no longer there: it was closed after an hour without use or by `close`, or Chrome restarted. `open` fails the same way. Go on with `tab new <url>`; what you are signed in to is kept, what was typed into the page is not. Never take over another tab.
 
 ## What pages can see
 
