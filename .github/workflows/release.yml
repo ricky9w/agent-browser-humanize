@@ -21,10 +21,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      # engines.bun is a minimum, not a pin: check against the current Bun.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: package.json
 
       - id: verify
         run: |
