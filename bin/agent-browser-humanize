@@ -1,0 +1,5 @@
+#!/usr/bin/env bun
+// The command. Bun resolves the links to this file (~/.local/bin, a release's current/bin), so the import finds src/.
+import { main } from "../src/cli.ts";
+
+await main(Bun.argv.slice(2), process.env);

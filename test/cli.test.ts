@@ -7,10 +7,12 @@ import { DEFAULT_PORT, DEFAULT_UPSTREAM, USAGE, agentBrowserConfig, localPort, n
 import { sessionDir } from "../src/sessions.ts";
 import { Humanizer } from "../src/humanize.ts";
 import { TYPING_CPS } from "../src/keyboard.ts";
+import { VERSION } from "../src/version.ts";
 import { startProxy } from "../src/server.ts";
 import { fakeClock } from "./helpers.ts";
 
-const CLI = join(import.meta.dir, "../src/cli.ts");
+// The command as installed: the entry in bin/, which runs main() from src/cli.ts.
+const CLI = join(import.meta.dir, "../bin/agent-browser-humanize");
 const dir = mkdtempSync(join(tmpdir(), "abh-cli-"));
 // A Chrome with no tabs, and a proxy in front of it.
 const chrome = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json([]) });
@@ -138,6 +140,11 @@ describe("command line", () => {
     expect(await cli(["--help"])).toEqual({ stdout: USAGE, stderr: "", code: 0 });
   });
 
+  test("--version prints the version in package.json", async () => {
+    const { version } = await Bun.file(join(import.meta.dir, "../package.json")).json();
+    expect(await cli(["--version"])).toEqual({ stdout: version, stderr: "", code: 0 });
+  });
+
   test("serve listens, reports health on the control API, and names the port it got", async () => {
     const p = spawn(["serve", "--port", "0", "--upstream", upstream], { AGENT_BROWSER_HUMANIZE_AGENT_BROWSER: "/nonexistent/agent-browser" });
     try {
@@ -152,7 +159,7 @@ describe("command line", () => {
       const listening = /listening on 127\.0\.0\.1:(\d+), upstream ([^,]+), typing 9 chars\/s/.exec(out);
       expect(listening?.[2]).toBe(upstream);
       const health = (await (await fetch(`http://127.0.0.1:${listening![1]}/__humanize/health`)).json()) as any;
-      expect(health).toMatchObject({ ok: true, upstream: true, connections: 0, agentBrowser: { error: "agent-browser not found at /nonexistent/agent-browser" } });
+      expect(health).toMatchObject({ ok: true, version: VERSION, upstream: true, connections: 0, agentBrowser: { error: "agent-browser not found at /nonexistent/agent-browser" } });
     } finally {
       p.kill();
       await p.exited;

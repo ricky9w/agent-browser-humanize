@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
-// The agent-browser-humanize command. `serve` runs the proxy; `runtime on|off <session>` turns the CDP Runtime domain
-// on for an agent-browser session's pinned tab, so `agent-browser console` and `errors` see the page's messages
-// (earlier ones included), or off again on every tab the session turned it on for.
+// The agent-browser-humanize command (`bin/agent-browser-humanize` runs `main`). `serve` runs the proxy;
+// `runtime on|off <session>` turns the CDP Runtime domain on for an agent-browser session's pinned tab, so
+// `agent-browser console` and `errors` see the page's messages (earlier ones included), or off again on every tab the
+// session turned it on for. `--version` prints the version.
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -12,12 +13,14 @@ import { macOSBrowser } from "./platform.ts";
 import { SESSION_NAME, startProxy } from "./server.ts";
 import { sessionDir, type Env } from "./sessions.ts";
 import { snapshot } from "./stats.ts";
+import { VERSION } from "./version.ts";
 
 export const DEFAULT_PORT = 9333;
 /** Chrome's usual remote debugging port. */
 export const DEFAULT_UPSTREAM = "127.0.0.1:9222";
 export const USAGE = `usage: agent-browser-humanize serve [--port <port>] [--upstream <host:port>]
-       agent-browser-humanize runtime on|off [--namespace <name>] <session>`;
+       agent-browser-humanize runtime on|off [--namespace <name>] <session>
+       agent-browser-humanize --version`;
 
 /** Wrong arguments: exit 2 with the usage. */
 class UsageError extends Error {}
@@ -153,10 +156,11 @@ async function runtime(args: string[], env: Env) {
   console.log(mode === "on" ? `Runtime on for ${label} in tab ${targetId}` : `Runtime off for ${label}: turned off in ${tabs} tab${tabs === 1 ? "" : "s"}`);
 }
 
-async function main([command, ...args]: string[], env: Env) {
+export async function main([command, ...args]: string[], env: Env) {
   try {
     if (command === "serve") serve(serveConfig(args, env));
     else if (command === "runtime") await runtime(args, env);
+    else if (command === "--version") console.log(VERSION);
     else if (command === "-h" || command === "--help") console.log(USAGE);
     else throw new UsageError(command === undefined ? "" : `unknown command: ${command}`);
   } catch (error) {

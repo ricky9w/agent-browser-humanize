@@ -8,6 +8,7 @@ import type { Humanizer } from "./humanize.ts";
 import { snapshot } from "./stats.ts";
 import { readBindings, sessionDir } from "./sessions.ts";
 import { LEASE_MS, TabLeases } from "./tabs.ts";
+import { VERSION } from "./version.ts";
 
 export interface ProxyOptions {
   /** Port to listen on (127.0.0.1); 0 picks a free one. */
@@ -190,7 +191,7 @@ export function startProxy({
       }
       if (url.pathname === "/__humanize/health") {
         const [targets, ab] = await Promise.all([upstreamTargets(), agentBrowser?.status()]);
-        return json({ ok: true, upstream: targets !== undefined, connections: connections.size, focus: keeper.status(), holds: holds.size, tabs: tabs.size, agentBrowser: ab, stats: snapshot() });
+        return json({ ok: true, version: VERSION, upstream: targets !== undefined, connections: connections.size, focus: keeper.status(), holds: holds.size, tabs: tabs.size, agentBrowser: ab, stats: snapshot() });
       }
       if (url.pathname === "/__humanize/runtime" && req.method === "POST") return setRuntime(req);
       const held = /^\/__humanize\/hold\/([^/]+)$/.exec(url.pathname)?.[1];

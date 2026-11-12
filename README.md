@@ -23,7 +23,24 @@ Bun and TypeScript, no runtime dependencies. agent-browser-humanize is an indepe
 
 ## Install
 
-There is no npm package. Clone this repository and link the command from the checkout:
+There is no npm package. Install a release, or link a clone of this repository.
+
+**A release.** Each release on [GitHub Releases](https://github.com/ricky9w/agent-browser-humanize/releases) has a tarball, `agent-browser-humanize-<version>.tar.gz`, with the command in `bin/`, the code, the [skill](#agent-skill), this README and the license. It needs no `bun install`: the proxy has no runtime dependencies. Unpack it into a directory of its own and link the command into a directory on your `PATH`:
+
+```sh
+version=0.1.0
+mkdir -p ~/opt/agent-browser-humanize/releases ~/.local/bin
+curl -fsSL "https://github.com/ricky9w/agent-browser-humanize/releases/download/v$version/agent-browser-humanize-$version.tar.gz" |
+  tar -xz -C ~/opt/agent-browser-humanize/releases
+mv ~/opt/agent-browser-humanize/releases/agent-browser-humanize-$version ~/opt/agent-browser-humanize/releases/$version
+ln -sfn releases/$version ~/opt/agent-browser-humanize/current
+ln -sfn ~/opt/agent-browser-humanize/current/bin/agent-browser-humanize ~/.local/bin/agent-browser-humanize
+agent-browser-humanize --version
+```
+
+With this layout, an upgrade unpacks the next release beside the others and moves the `current` link, and going back moves it back; restart the proxy after either. Point services and links at `current/bin/agent-browser-humanize`, never at a file of one release.
+
+**A clone.** For development, or to follow `main`:
 
 ```sh
 git clone https://github.com/ricky9w/agent-browser-humanize.git
@@ -31,7 +48,9 @@ cd agent-browser-humanize
 bun link
 ```
 
-`bun link` registers the checkout with Bun and links the `agent-browser-humanize` command into Bun's global bin directory (`~/.bun/bin` by default; `bun pm bin -g` prints it), which must be on your `PATH`. The command runs the checkout itself, so `git pull` updates it, and `bun unlink` in the checkout removes it. Without linking, run `bun src/cli.ts` in the checkout instead of `agent-browser-humanize`. Running it needs no `bun install`; that is only for development.
+`bun link` registers the checkout with Bun and links the `agent-browser-humanize` command (`bin/agent-browser-humanize`) into Bun's global bin directory (`~/.bun/bin` by default; `bun pm bin -g` prints it), which must be on your `PATH`. The command runs the checkout itself, so `git pull` updates it, and `bun unlink` in the checkout removes it. Without linking, run `bin/agent-browser-humanize` in the checkout instead. Running it needs no `bun install`; that is only for development.
+
+`agent-browser-humanize --version` prints the version, and the running proxy reports it in [`/__humanize/health`](#control-api).
 
 ## Quick start
 
@@ -72,7 +91,15 @@ bun link
 
 ## Agent skill
 
-`skills/agent-browser-humanize/SKILL.md` is an agent skill for agents that use agent-browser through the proxy: which commands produce human input and which still reveal automation, how to see console output and page errors, and how to share one browser with other sessions. To install it, copy or symlink the directory into the directory your agent loads skills from, for example:
+`skills/agent-browser-humanize/SKILL.md` is an agent skill for agents that use agent-browser through the proxy: which commands produce human input and which still reveal automation, how to see console output and page errors, and how to share one browser with other sessions.
+
+The repository, and every release, is a [Pi package](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md) that declares this skill (`pi.skills` in `package.json`). For Pi, install it as a local package, for example the installed release:
+
+```sh
+pi install ~/opt/agent-browser-humanize/current
+```
+
+For other agents, copy or symlink the directory into the directory your agent loads skills from, for example:
 
 ```sh
 ln -s "$PWD/skills/agent-browser-humanize" <skills-directory>/agent-browser-humanize
@@ -115,7 +142,7 @@ The proxy is a single long-running process. Run it under your service manager, a
 
 ```sh
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.agent-browser-humanize.plist
-launchctl kickstart -k gui/$(id -u)/com.example.agent-browser-humanize   # restart, e.g. after git pull
+launchctl kickstart -k gui/$(id -u)/com.example.agent-browser-humanize   # restart, e.g. after an upgrade
 ```
 
 **Linux (systemd).** Save as `~/.config/systemd/user/agent-browser-humanize.service`; `%h` is your home directory:
@@ -275,7 +302,7 @@ agent-browser can also get its CDP URL from a `browser.provider` plugin. In 0.41
 
 | Request | Result |
 | --- | --- |
-| `GET /__humanize/health` | `{ ok, upstream, connections, focus, holds, tabs, agentBrowser, stats }`; `upstream` says whether Chrome answers, `focus` is `{ inUse, emulated }` (tabs a client connection uses, tabs the focus keeper emulates), `holds` the number of tabs held, `tabs` the number of tabs that have an owner, `agentBrowser` is the self-check's result, `stats` the counters. |
+| `GET /__humanize/health` | `{ ok, version, upstream, connections, focus, holds, tabs, agentBrowser, stats }`; `version` is the proxy's version, `upstream` says whether Chrome answers, `focus` is `{ inUse, emulated }` (tabs a client connection uses, tabs the focus keeper emulates), `holds` the number of tabs held, `tabs` the number of tabs that have an owner, `agentBrowser` is the self-check's result, `stats` the counters. |
 | `POST /__humanize/runtime` `{ targetId, enabled, session?, namespace? }` | On: `200 { targetId, enabled, sessions }`, and the tab is recorded for `session`. `404` when the tab is gone, `409` when no client is attached to it, `502` when Chrome does not answer. Off: turns off `targetId` and every tab recorded for `session`, then forgets them. It always answers `200 { targetId, enabled, tabs, sessions }`, also for a gone tab or one no client is attached to; `tabs` counts the tabs that had Runtime switched on. `namespace` keeps sessions of different agent-browser namespaces apart. Without `session`, only `targetId` is affected. `400` for a bad body; `session` is an agent-browser session name (letters, digits, `_`, `-`, at most 128 characters). Recorded tabs that no client connection knows anymore are forgotten. |
 | `PUT /__humanize/hold/<targetId>?ttl=<seconds>` | [Holds](#holds) the tab, or renews its hold, for `ttl` seconds: whole seconds from 1 to 60, 15 without `ttl`. `200 { ok, targetId, expiresIn }`, `expiresIn` in seconds. `400` for a `targetId` that is not Chrome's (32 hexadecimal digits, upper case) or a bad `ttl`. The proxy does not check that the tab exists. |
 | `DELETE /__humanize/hold/<targetId>` | Releases the hold: `200 { ok, targetId }`, also when there was none. `400` for a bad `targetId`. |
@@ -333,6 +360,17 @@ The integration test drives agent-browser through the proxy against a real Chrom
 - `--external` also runs rebrowser's public bot detector and checks its `runtimeEnableLeak`.
 
 It checks the self-check's result in health and the log, that the tabs of a session that ended with `close` are closed while a session that shut down idle keeps its tab and comes back to it, that a tab a page opens gets its opener's owner and an ended lease closes both, that opening and switching session tabs leaves Chrome's focused tab alone (seen through `document.hasFocus()` in a control tab opened straight on Chrome, and skipped when that does not show a tab opened in front), that the session's tab is visible, focused and rendering, two sessions clicking and filling in their own tabs at the same time, a session's tab staying visible and focused and still taking a click and a `fill` after another session ended, an `alert` and a `confirm` handled with `dialog accept` and `dismiss` and a screenshot in a background agent tab, click points, holds and pressure, keystrokes and Shift for short `fill`s, select-all for the platform Chrome runs on, a single `insertText` for long ones, typing speed, wheel scrolling, and the `runtime` command with `agent-browser console` and after a tab switch. Run it after changing input rules and after upgrading agent-browser or Chrome.
+
+### Releases
+
+A release is a tag `v<version>` on `main`, where `<version>` is the `version` in `package.json`. To make one, change the version in `package.json` and merge that commit to `main`, then tag it and push the tag:
+
+```sh
+git tag v0.2.0 origin/main
+git push origin v0.2.0
+```
+
+The [release workflow](.github/workflows/release.yml) refuses a tag that does not match `package.json` or is not on `main`, runs `bun run check` and `bun test`, packs `agent-browser-humanize-<version>.tar.gz`, checks that the packed command reports that version, and attaches the tarball to the tag's GitHub Release, which it creates if there is none. A version with a `-`, such as `0.2.0-rc.1`, is marked as a prerelease.
 
 ## License
 

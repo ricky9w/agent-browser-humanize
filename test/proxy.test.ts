@@ -8,6 +8,7 @@ import { CLEAR_SOURCE, FOCUS_SOURCE, SCROLL_ELEMENT_SOURCE } from "../src/recogn
 import { startProxy } from "../src/server.ts";
 import type { Binding } from "../src/sessions.ts";
 import { TabLeases } from "../src/tabs.ts";
+import { VERSION } from "../src/version.ts";
 import { fakeClock } from "./helpers.ts";
 
 // A fake Chrome: discovery endpoints plus WebSockets that record what they receive. Only the focus keeper connects to
@@ -148,9 +149,10 @@ describe("HTTP", () => {
     expect(list[0].webSocketDebuggerUrl).toBe(`ws://127.0.0.1:${server.port}/devtools/page/T1`);
   });
 
-  test("health reports Chrome, connections, focus emulation and the agent-browser self-check", async () => {
+  test("health reports the version, Chrome, connections, focus emulation and the agent-browser self-check", async () => {
     expect(await health()).toMatchObject({
       ok: true,
+      version: VERSION,
       upstream: true,
       connections: 0,
       focus: { inUse: 0, emulated: 0 },
