@@ -8,16 +8,24 @@ import { TabLeases } from "../src/tabs.ts";
 /** A browser with `tabs` open and agent-browser bindings in `bindings`, on a clock of its own; records the tabs closed. */
 function setup(tabs: string[], bindings: Binding[] = [], file?: string) {
   const closed: string[] = [];
-  const state = { tabs: tabs as string[] | undefined, bindings, held: new Set<string>(), now: 0 };
+  const state = {
+    tabs: tabs as string[] | undefined,
+    bindings,
+    held: new Set<string>(),
+    now: 0,
+    /** Chrome's list of tabs for one test's own timing; otherwise `tabs`. */
+    list: undefined as (() => Promise<string[] | undefined>) | undefined,
+    close: async (id: string) => {
+      closed.push(id);
+      state.tabs = state.tabs?.filter((t) => t !== id);
+    },
+  };
   const open = () =>
     new TabLeases({
       file,
       bindings: async () => state.bindings,
-      tabs: async () => state.tabs,
-      close: async (id) => {
-        closed.push(id);
-        state.tabs = state.tabs?.filter((t) => t !== id);
-      },
+      tabs: async () => (state.list ? state.list() : state.tabs),
+      close: (id) => state.close(id),
       held: (id) => state.held.has(id),
       ttl: 1000,
       now: () => state.now,
@@ -75,6 +83,51 @@ describe("TabLeases", () => {
     await leases.check();
     expect(closed).toEqual(["T1"]);
     expect(leases.release("a")).toBe(0);
+  });
+
+  test("a lease that ends while a check is running is not lost in it", async () => {
+    const { leases, closed, state } = setup(["T1", "T2"]);
+    leases.add("T2", "b");
+    leases.add("T1", "a");
+    // The check is past b, closing a's tab, when b's lease ends.
+    let closing!: () => void;
+    const reached = new Promise<void>((resolve) => (closing = resolve));
+    let finish!: () => void;
+    const held = new Promise<void>((resolve) => (finish = resolve));
+    const close = state.close;
+    state.close = async (id) => {
+      closing();
+      await held;
+      return close(id);
+    };
+    state.bindings = [{ session: "s", targetId: "T1", pinned: false } as Binding];
+    const check = leases.check();
+    await reached;
+    state.close = close;
+    expect(leases.release("b")).toBe(1);
+    finish();
+    await check;
+    expect(closed).toEqual(["T1", "T2"]);
+  });
+
+  test("a tab opened while a check waits for Chrome's list is not forgotten", async () => {
+    const { leases, closed, state } = setup(["T1"]);
+    leases.add("T1", "a");
+    // Chrome's answer was made before T2 existed.
+    let asked!: () => void;
+    const waiting = new Promise<void>((resolve) => (asked = resolve));
+    let answer!: (tabs: string[]) => void;
+    state.list = () => (asked(), new Promise((resolve) => (answer = resolve)));
+    const check = leases.check();
+    await waiting;
+    leases.add("T2", "b");
+    state.list = undefined;
+    state.tabs = ["T1", "T2"];
+    answer(["T1"]);
+    await check;
+    expect(leases.release("b")).toBe(1);
+    await leases.check();
+    expect(closed).toEqual(["T2"]);
   });
 
   test("a tab a page opened belongs to the owner of the tab that opened it", async () => {

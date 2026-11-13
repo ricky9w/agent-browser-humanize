@@ -100,6 +100,19 @@ export class FocusKeeper {
     void this.reconcile(targetId, t);
   }
 
+  /**
+   * Resolves once the keeper has caught up with every retain and release so far: each command it had to send
+   * has been answered by Chrome, or has failed. Work asked for while this waits is waited for as well.
+   */
+  async settled(): Promise<void> {
+    let seen: Promise<void>[] = [];
+    for (;;) {
+      const queues = [...this.targets.values()].map((t) => t.queue);
+      if (queues.every((queue) => seen.includes(queue))) return;
+      await Promise.all((seen = queues));
+    }
+  }
+
   /** Targets in use by a client connection, and those the keeper emulates focus on. */
   status() {
     const ts = [...this.targets.values()];

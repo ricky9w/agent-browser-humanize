@@ -37,6 +37,10 @@ export class TabLeases {
   /** Owner to the time its lease ends. */
   private leases = new Map<string, number>();
   private running?: Promise<void>;
+  /** A check was asked for since the running one read the state: it runs once more. */
+  private again = false;
+  /** Tabs recorded since the running check asked Chrome for its tabs, which its answer may not list yet. */
+  private recent = new Set<string>();
   private timer?: ReturnType<typeof setInterval>;
   private now: () => number;
   private ttl: number;
@@ -83,6 +87,7 @@ export class TabLeases {
   /** `owner`'s client created `tab`. */
   add(tab: string, owner: string) {
     this.owners.set(tab, owner);
+    this.recent.add(tab);
     this.leases.set(owner, this.now() + this.ttl);
     this.save();
   }
@@ -116,18 +121,29 @@ export class TabLeases {
     return tabs;
   }
 
-  /** Drops tabs Chrome no longer has and closes the tabs of owners whose lease ended; one check at a time. */
+  /**
+   * Drops tabs Chrome no longer has and closes the tabs of owners whose lease ended; one check at a time. A
+   * check asked for while one runs is not lost in it: the running one may be past the state that changed,
+   * so another follows, and the promise resolves after that one.
+   */
   check(): Promise<void> {
-    return (this.running ??= this.sweep().finally(() => (this.running = undefined)));
+    this.again = true;
+    return (this.running ??= (async () => {
+      while (this.again) {
+        this.again = false;
+        await this.sweep();
+      }
+    })().finally(() => (this.running = undefined)));
   }
 
   private async sweep() {
     if (!this.owners.size) return;
+    this.recent.clear();
     const [live, bindings] = await Promise.all([this.options.tabs(), this.options.bindings?.() ?? []]);
     // Chrome does not answer: nothing is known about its tabs.
     if (!live) return;
     const open = new Set(live);
-    for (const tab of this.owners.keys()) if (!open.has(tab)) this.owners.delete(tab);
+    for (const tab of this.owners.keys()) if (!open.has(tab) && !this.recent.has(tab)) this.owners.delete(tab);
     const now = this.now();
     for (const owner of new Set(this.owners.values())) {
       const tabs = this.tabsOf(owner);

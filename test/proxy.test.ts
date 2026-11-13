@@ -10,10 +10,14 @@ import type { Binding } from "../src/sessions.ts";
 import { TabLeases } from "../src/tabs.ts";
 import { VERSION } from "../src/version.ts";
 import { fakeClock } from "./helpers.ts";
+import { until } from "./until.ts";
 
 // A fake Chrome: discovery endpoints plus WebSockets that record what they receive. Only the focus keeper connects to
 // the browser endpoint that /json/version names; test clients connect to another path, so the two are told apart.
 const KEEPER_PATH = "/devtools/browser/main";
+/** A command no part of the proxy knows, which it therefore passes through untouched in both directions. */
+const SYNC = "Test.sync";
+let nextSync = 900_000_000;
 type Ws = ServerWebSocket<{ path: string }>;
 const received: any[] = [];
 const sockets: Ws[] = [];
@@ -48,6 +52,8 @@ const chrome: Bun.Server<{ path: string }> = Bun.serve({
     open: (ws) => void (ws.data.path === KEEPER_PATH ? keeperSockets : sockets).push(ws),
     message(ws, data) {
       const msg = JSON.parse(String(data));
+      // A client's marker (see `settled` in connect): answered at once and not recorded.
+      if (msg.method === SYNC) return void ws.send(JSON.stringify({ id: msg.id, result: {} }));
       if (ws.data.path !== KEEPER_PATH) return void received.push(msg);
       keeperReceived.push(msg);
       const answer = keeperAnswer(msg);
@@ -78,17 +84,17 @@ afterAll(() => {
   chrome.stop(true);
 });
 
-const until = async (check: () => boolean) => {
-  for (let i = 0; i < 200 && !check(); i++) await Bun.sleep(5);
-  expect(check()).toBe(true);
-};
-
 async function connect(path = "/devtools/browser/abc", owner?: string) {
   const messages: any[] = [];
   const before = sockets.length;
   // Bun's WebSocket takes headers, as agent-browser sends them with `--cdp-headers`.
   const ws = new WebSocket(`ws://127.0.0.1:${server.port}${path}`, (owner ? { headers: { "x-humanize-owner": owner } } : undefined) as any);
-  ws.onmessage = (e) => messages.push(JSON.parse(String(e.data)));
+  const synced = new Set<number>();
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(String(e.data));
+    if (synced.delete(msg.id)) return;
+    messages.push(msg);
+  };
   await new Promise((resolve) => (ws.onopen = resolve));
   await until(() => sockets.length > before);
   const chromeSide = sockets.at(-1)!;
@@ -100,7 +106,26 @@ async function connect(path = "/devtools/browser/abc", owner?: string) {
     ws.close();
     await until(() => !connections.has(conn));
   };
-  return { ws, messages, send, emit, close };
+  /**
+   * Resolves once the proxy has dealt with everything this client and its Chrome side sent so far, and all the
+   * proxy sent to either because of it has arrived: a marker goes client → proxy → Chrome and back, behind
+   * everything already on those two sockets, which carry messages in order.
+   */
+  const sync = async () => {
+    const id = nextSync++;
+    synced.add(id);
+    send({ id, method: SYNC });
+    await until(() => !synced.has(id), "the marker to come back");
+  };
+  /**
+   * `sync`, and then the keeper has finished what that asked of it. Use one of the two before asserting that
+   * something was not sent: sleeping "long enough" proves nothing on a busy machine.
+   */
+  const settled = async () => {
+    await sync();
+    await keeper.settled();
+  };
+  return { ws, messages, send, emit, close, sync, settled };
 }
 
 const post = (body: object) => fetch(`${base}/__humanize/runtime`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -253,12 +278,12 @@ describe("WebSocket", () => {
   });
 
   test("without a session, off reaches only the given tab", async () => {
-    const { close } = await twoTabs();
+    const { close, settled } = await twoTabs();
     expect((await runtime("T1", true)).status).toBe(200);
     expect((await runtime("T2", true)).status).toBe(200);
     expect(await runtimeJson("T2", false)).toEqual({ targetId: "T2", enabled: false, tabs: 1, sessions: 1 });
     await until(() => runtimeSent().length === 3);
-    await Bun.sleep(20);
+    await settled();
     expect(runtimeSent()).toEqual(["Runtime.enable S1", "Runtime.enable S2", "Runtime.disable S2"]);
     expect(runtimeTabs.size).toBe(0);
     await close();
@@ -408,7 +433,7 @@ describe("focus keeper", () => {
     // Enabling Page again (a tab switch back) passes through byte for byte; the keeper does nothing more.
     expect(await enablePage(c, 3, "S1")).toEqual({ id: 3, result: {}, sessionId: "S1" });
     expect(received[2]).toEqual({ id: 3, method: "Page.enable", sessionId: "S1" });
-    await Bun.sleep(20);
+    await c.settled();
     expect(received.every((m) => m.method === "Page.enable")).toBe(true);
     expect(keeperReceived).toHaveLength(4);
     // The client gets exactly one answer per command, and none for the proxy's own.
@@ -433,7 +458,7 @@ describe("focus keeper", () => {
     // A closes, and one of B's two sessions detaches: B still uses the tab.
     await a.close();
     b.emit({ method: "Target.detachedFromTarget", params: { sessionId: "B1", targetId: "T1" } });
-    await Bun.sleep(30);
+    await b.settled();
     expect(keeperDid()).toEqual(["attach T1", "emulate T1"]);
     expect(keeper.status()).toEqual({ inUse: 1, emulated: 1 });
     // B's last session on it detaches.
@@ -462,14 +487,14 @@ describe("focus keeper", () => {
     await until(() => received.length === 1 && keeperReceived.length === 1);
     expect(received[0]).toMatchObject({ method: "Page.enable", params: { enableFileChooserOpenedEvent: true }, sessionId: "S1" });
     c.emit({ id: received[0].id, result: {}, sessionId: "S1" });
-    await Bun.sleep(30);
+    await c.sync();
     expect(c.messages).toHaveLength(1); // only the attachedToTarget event
     const chromeSide = keeperSockets.at(-1)!;
     keeperSessions.set("KW", "T1");
     chromeSide.send(JSON.stringify({ id: keeperReceived[0].id, result: { sessionId: "KW" } }));
     await until(() => keeperReceived.length === 2);
     expect(keeperDid()).toEqual(["attach T1", "emulate T1"]);
-    await Bun.sleep(30);
+    await c.sync();
     expect(c.messages).toHaveLength(1);
     chromeSide.send(JSON.stringify({ id: keeperReceived[1].id, result: {}, sessionId: "KW" }));
     await until(() => c.messages.length === 2);
@@ -492,7 +517,7 @@ describe("focus keeper", () => {
     c.emit({ id: received[3].id, error: { code: -32001, message: "Session with given id not found." }, sessionId: "S4" });
     await until(() => c.messages.length === 8);
     expect(c.messages[7]).toEqual({ id: 10, error: { code: -32001, message: "Session with given id not found." }, sessionId: "S4" });
-    await Bun.sleep(20);
+    await c.settled();
     expect(c.messages.filter((m) => m.id !== undefined).map((m) => m.id)).toEqual([7, 8, 9, 10]);
     // The keeper session whose emulation failed is detached again.
     expect(keeperDid().slice(2)).toEqual(["attach T2", "attach T3", "emulate T3", "detach T3", "attach T4", "emulate T4"]);
@@ -520,7 +545,7 @@ describe("focus keeper", () => {
     keeperSockets.at(-1)!.send(JSON.stringify({ id: keeperReceived[0].id, result: { sessionId: "KO" } }));
     await until(() => b.messages.length === 2);
     expect(b.messages[1]).toEqual({ id: 1, result: {}, sessionId: "B1" });
-    await Bun.sleep(20);
+    await b.settled();
     expect(keeperDid()).toEqual(["attach T2", "emulate T2"]);
     expect(keeper.status()).toEqual({ inUse: 1, emulated: 1 });
     await b.close();
@@ -529,7 +554,7 @@ describe("focus keeper", () => {
   });
 
   test("no keeper for iframes, workers and other non-page targets; their Page.enable passes through", async () => {
-    const { messages, send, emit, close } = await connect();
+    const { messages, send, emit, close, settled } = await connect();
     const types = ["iframe", "worker", "service_worker", "shared_worker", "browser_ui", "tab"];
     types.forEach((type, i) => emit(attached(`N${i}`, `NT${i}`, type)));
     await until(() => messages.length === types.length);
@@ -540,7 +565,7 @@ describe("focus keeper", () => {
     expect(received.map((m) => m.id)).toEqual([...types.map((_, i) => i + 1), 99]);
     for (const m of received) emit({ id: m.id, result: {}, ...(m.sessionId ? { sessionId: m.sessionId } : {}) });
     await until(() => messages.length === types.length * 2 + 1);
-    await Bun.sleep(20);
+    await settled();
     expect(keeperReceived).toHaveLength(0);
     await close();
   });
@@ -556,7 +581,7 @@ describe("focus keeper", () => {
     await until(() => c.messages.length === 3);
     await enablePage(c, 3, "SW");
     await enablePage(c, 4, "S3");
-    await Bun.sleep(20);
+    await c.settled();
     expect(keeperDid()).toEqual(["attach T3", "emulate T3"]);
     await c.close();
     await until(() => keeperReceived.length === 3);
@@ -602,7 +627,7 @@ describe("focus keeper", () => {
     keeperSockets.at(-1)!.send(JSON.stringify({ method: "Target.detachedFromTarget", params: { sessionId: session, targetId: "T2" } }));
     await until(() => keeper.status().emulated === 0);
     await c.close();
-    await Bun.sleep(20);
+    await keeper.settled();
     expect(keeperDid()).toEqual(["attach T2", "emulate T2"]);
     expect(keeper.status()).toEqual({ inUse: 0, emulated: 0 });
     expect(await stat("focus.keeper.ended")).toBe(ended + 1);
@@ -626,15 +651,14 @@ describe("holds", () => {
   const answered = new Set<number>();
   /** Answers the proxy's own commands with {} until `done`; leaves the ones that arrive after it unanswered. */
   async function answerUntil(c: Awaited<ReturnType<typeof connect>>, done: () => boolean) {
-    for (let i = 0; i < 500 && !done(); i++) {
+    await until(() => {
+      if (done()) return true;
       for (const m of received) {
         if (m.id < 1_000_000_000 || answered.has(m.id)) continue;
         answered.add(m.id);
         c.emit({ id: m.id, result: {}, sessionId: m.sessionId });
       }
-      await Bun.sleep(2);
-    }
-    expect(done()).toBe(true);
+    }, `the proxy's commands: ${done}`);
   }
 
   beforeEach(() => {
@@ -735,7 +759,7 @@ describe("holds", () => {
     c.emit({ id: down("A").id, result: {}, sessionId: "S1" });
     await until(() => c.messages.length === 3);
     expect(c.messages[2]).toEqual(refusal(1, "S1"));
-    await Bun.sleep(20);
+    await c.settled();
     expect(received).toHaveLength(sent + 2);
     expect(await stat("hold.interrupted")).toBe(interrupted + 1);
     await c.close();
@@ -766,7 +790,7 @@ describe("holds", () => {
     c.emit({ id: received.at(-1).id, result: {}, sessionId: "S1" });
     await until(() => c.messages.length === 5);
     expect(c.messages[4]).toEqual(refusal(3, "S1"));
-    await Bun.sleep(20);
+    await c.settled();
     expect(received).toHaveLength(before);
     await c.close();
   });

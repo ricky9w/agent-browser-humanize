@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { macOSBrowser } from "../src/platform.ts";
+import { until } from "./until.ts";
 
 const { values: opt } = parseArgs({
   options: {
@@ -41,6 +42,8 @@ Object.assign(env, { AGENT_BROWSER_PIN_TAB: "1", AGENT_BROWSER_CONFIG: config, A
 // --- harness -------------------------------------------------------------------------------------------------------
 type Ev = Record<string, any>;
 const reports = new Map<string, any>();
+/** How many reports each page has sent. */
+const reported = new Map<string, number>();
 const probe = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
@@ -49,6 +52,7 @@ const probe = Bun.serve({
     if (req.method === "POST" && url.pathname === "/report") {
       const r = (await req.json()) as { tag: string };
       reports.set(r.tag, r);
+      reported.set(r.tag, (reported.get(r.tag) ?? 0) + 1);
       return new Response("ok");
     }
     if (url.pathname === "/probe.html") return new Response(Bun.file(join(import.meta.dir, "probe.html")));
@@ -80,13 +84,12 @@ async function launchChrome() {
   const flags = [`--user-data-dir=${profile}`, "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check"];
   chrome = Bun.spawn([chromePath(), ...flags, ...(opt.headless ? ["--headless"] : []), "about:blank"], { stdout: "ignore", stderr: "ignore" });
   // Chrome writes the port it picked, and the browser endpoint's path, to DevToolsActivePort in the profile.
-  for (let i = 0; i < 300 && chrome.exitCode === null; i++) {
+  const found = await until(async () => {
+    if (chrome!.exitCode !== null) throw new Error(`Chrome exited with code ${chrome!.exitCode} before opening its debugging port`);
     const active = await Bun.file(join(profile, "DevToolsActivePort")).text().catch(() => "");
-    const found = /^(\d+)\n\/devtools\/browser\//.exec(active)?.[1];
-    if (found) return `127.0.0.1:${found}`;
-    await Bun.sleep(100);
-  }
-  throw new Error(`Chrome did not open its debugging port (exit code ${chrome.exitCode})`);
+    return /^(\d+)\n\/devtools\/browser\//.exec(active)?.[1];
+  }, "Chrome's debugging port", 30_000);
+  return `127.0.0.1:${found}`;
 }
 
 /** Starts the proxy on a free port; returns the port it reports. */
@@ -98,12 +101,10 @@ async function startProxy() {
       for await (const chunk of stream) proxyLog += decoder.decode(chunk, { stream: true });
     })();
   }
-  for (let i = 0; i < 100 && proxy.exitCode === null; i++) {
-    const found = /listening on 127\.0\.0\.1:(\d+)/.exec(proxyLog)?.[1];
-    if (found) return found;
-    await Bun.sleep(100);
-  }
-  throw new Error(`the proxy did not start: ${proxyLog.trim()}`);
+  return until(() => {
+    if (proxy!.exitCode !== null) throw new Error(`the proxy did not start: ${proxyLog.trim()}`);
+    return /listening on 127\.0\.0\.1:(\d+)/.exec(proxyLog)?.[1];
+  }, "the proxy to listen", 10_000);
 }
 
 async function run(cmd: string[], extraEnv: Record<string, string> = {}) {
@@ -118,7 +119,18 @@ const pinnedTab = async (name = session) => ((await Bun.file(join(sessions, `${n
 const runtime = (mode: string, name = session, extraEnv?: Record<string, string>) =>
   run([process.execPath, join(root, "src/cli.ts"), "runtime", mode, name], { AGENT_BROWSER_HUMANIZE_PORT: port, ...extraEnv });
 const health = async () => (await fetch(`http://127.0.0.1:${port}/__humanize/health`)).json() as Promise<any>;
-const report = async (tag: string, wait = 800) => (await Bun.sleep(wait), reports.get(tag));
+/**
+ * The page's state as it reports it, never an older report than the call. A check about what a page does over
+ * time (frame rate, timers, detections) gives `watch`, the real time the page is left to run first: here the
+ * passing of time is what is measured, in a real browser, and nothing signals its end. Without `watch` the call
+ * only waits for the page's next reports: the second one after the call was built after it for certain.
+ */
+const report = async (tag: string, watch = 0) => {
+  if (watch) await Bun.sleep(watch);
+  const since = reported.get(tag) ?? 0;
+  await until(() => (reported.get(tag) ?? 0) >= since + 2, `a new report from ${tag}`, 10_000);
+  return reports.get(tag);
+};
 const probeUrl = (tag: string) => `http://127.0.0.1:${probe.port}/probe.html?tag=${tag}`;
 
 let failures = 0;
@@ -130,6 +142,13 @@ const stats = (xs: number[]) => {
   const sorted = [...xs].sort((a, b) => a - b), mean = xs.reduce((a, b) => a + b, 0) / (xs.length || 1);
   return { min: sorted[0] ?? NaN, max: sorted.at(-1) ?? NaN, mean, text: `min ${sorted[0]?.toFixed(1)} mean ${mean.toFixed(1)} max ${sorted.at(-1)?.toFixed(1)}` };
 };
+/**
+ * Whether the times a real page measured lie in a range, but for one in ten of them (at least one). The planned
+ * times are checked exactly on a simulated clock in the unit tests; here a stalled frame or a busy machine
+ * stretches a sample or two, which is no fault of the proxy, while a wrong rule moves all of them.
+ */
+const mostly = (xs: number[], low: number, high: number) =>
+  xs.length > 0 && xs.filter((x) => x < low || x > high).length <= Math.max(1, Math.floor(xs.length / 10));
 const after = (events: Ev[], i: number, pred: (e: Ev) => boolean) => events.slice(i + 1).find(pred);
 /** A CDP connection straight to Chrome, without the proxy. */
 async function direct() {
@@ -179,7 +198,7 @@ function typing(events: Ev[]) {
 async function selfCheck() {
   console.log("\n# agent-browser self-check");
   const status = (await health()).agentBrowser;
-  for (let i = 0; i < 20 && !/page functions/.test(proxyLog); i++) await Bun.sleep(100);
+  await until(() => /page functions/.test(proxyLog), "the proxy's check of agent-browser", 10_000).catch(() => undefined);
   check(
     "health and log: all recognized page functions found in agent-browser",
     !!status?.recognizers && Object.values(status.recognizers).every(Boolean) && /recognized page functions found/.test(proxyLog) && !proxyLog.includes("WARNING"),
@@ -203,6 +222,8 @@ async function foreground() {
   try {
     const { sessionId } = await cdp.send("Target.attachToTarget", { targetId: await open(), flatten: true });
     const focused = async () => {
+      // Chrome moves focus some time after the command that would take it, and says nothing when it does not:
+      // real time has to pass before the control tab is asked.
       await Bun.sleep(300);
       return (await cdp.send("Runtime.evaluate", { expression: "document.hasFocus()", returnByValue: true }, sessionId)).result.value === true;
     };
@@ -332,10 +353,8 @@ async function endedSessions() {
   const pages = async () =>
     ((await (await fetch(`http://${upstream}/json/list`)).json()) as { id: string; type: string }[]).filter((t) => t.type === "page").map((t) => t.id);
   /** Whether all of `ids` are gone within `ms`; the proxy checks 3 s after a session's connection closes. */
-  const gone = async (ids: string[], ms = 10_000) => {
-    for (let t = 0; t < ms; t += 250, await Bun.sleep(250)) if ((await pages()).every((id) => !ids.includes(id))) return true;
-    return false;
-  };
+  const gone = (ids: string[], ms = 10_000) =>
+    until(async () => (await pages()).every((id) => !ids.includes(id)), "the tabs to close", ms).then(() => true, () => false);
   const [done, idle] = [`${session}-done`, `${session}-idle`];
   const tag = `ended-${Date.now()}`;
   await abAs(done, "open", probeUrl(`${tag}-a`));
@@ -349,6 +368,8 @@ async function endedSessions() {
   // An idle shutdown leaves the binding pinned: the session can come back to its tab.
   await abAs(idle, "--idle-timeout", "2s", "open", probeUrl(`${tag}-c`));
   const tab = await pinnedTab(idle);
+  // Nothing is to happen to the tab, so there is no event to wait for: agent-browser's daemon shuts down after
+  // 2 s idle, and the proxy looks at the tabs 3 s after its connection closed. 7 s outlasts both.
   await Bun.sleep(7000);
   const kept = Boolean(tab && (await pages()).includes(tab));
   const back = await abAs(idle, "get", "url");
@@ -362,8 +383,10 @@ async function endedSessions() {
   const before = await pages();
   await asOwner("open", `data:text/html,<a id=l target=_blank href="${probeUrl(`${tag}-d`)}">open</a>`);
   await asOwner("click", "#l");
-  await Bun.sleep(1500);
-  const mine = (await pages()).filter((id) => !before.includes(id));
+  const mine = await until(async () => {
+    const opened = (await pages()).filter((id) => !before.includes(id));
+    return opened.length >= 2 ? opened : undefined;
+  }, "the tab the page opens", 10_000).catch(async () => (await pages()).filter((id) => !before.includes(id)));
   const lease = (method: string) => fetch(`http://127.0.0.1:${port}/__humanize/lease/${owned}`, { method }).then((res) => res.json() as Promise<{ tabs: number }>);
   const renewed = await lease("PUT");
   check("a tab a page opens belongs to the owner of the tab that opened it", mine.length === 2 && renewed.tabs === 2, `${mine.length} new tab(s), ${renewed.tabs} owned`);
@@ -404,6 +427,7 @@ async function clicks() {
   const button = `@${/button "Press me" \[ref=(e\d+)\]/.exec((await ab("snapshot", "-i")).out)?.[1]}`;
   for (const target of [button, "#name", button, "#bio", button, "#name", button]) {
     await ab("click", target);
+    // A person's pause between clicks: part of what the page is shown, not a wait for anything.
     await Bun.sleep(250 + Math.random() * 300);
   }
   await ab("dblclick", button);
@@ -420,7 +444,7 @@ async function clicks() {
   const mdowns = ev.filter((e) => e.type === "mousedown");
   const holds = mdowns.map((d) => after(ev, ev.indexOf(d), (e) => e.type === "mouseup")!.t - d.t);
   const h = stats(holds);
-  check("button held 60-140 ms", h.min >= 58 && h.max <= 145, `ms ${h.text}`);
+  check("button held 60-140 ms", mostly(holds, 58, 145), `ms ${h.text}`);
   const moves = mdowns.map((d, i) => ev.slice(i ? ev.indexOf(mdowns[i - 1]!) : 0, ev.indexOf(d)).filter((e) => e.type === "mousemove").length);
   // The double click aims at the button clicked just before, so the pointer stays where it is.
   check("pointer travels a path before each new target", moves.slice(0, 7).every((m) => m >= 3) && moves[7] === 0, `mouse moves per click ${moves.join(",")}`);
@@ -439,11 +463,13 @@ async function keyboard() {
   const sentence = "The quick brown fox jumps over the lazy dog, then naps. Meet me at 5:30 by the old oak tree near the river bank today ok";
   const long = `${sentence} -- and this part makes it longer than the limit.`;
   const f1 = await ab("fill", "#name", name);
-  await Bun.sleep(300);
+  // A person's pause between fields: part of what the page is shown, not a wait for anything.
+  const pause = () => Bun.sleep(300);
+  await pause();
   const f2 = await ab("fill", "#name", "Pat O'Neil");
   const v2 = (await ab("get", "value", "#name")).out;
   const f3 = await ab("fill", "#bio", long);
-  await Bun.sleep(300);
+  await pause();
   const f4 = await ab("fill", "#name", sentence);
   const r = await report(tag);
   const ev: Ev[] = r.events;
@@ -477,7 +503,7 @@ async function keyboard() {
   const holds = stats(t4.holds);
   check(`120-char fill within agent-browser's 30 s`, f4.code === 0 && f4.ms < 30000 && t4.downs.length === sentence.length, `${(f4.ms / 1000).toFixed(1)} s, ${t4.downs.length} key-downs`);
   check("typing speed 8-10 chars/s", t4.cps >= 7.5 && t4.cps <= 10.5, `${t4.cps.toFixed(2)} chars/s (${name.length}-char fill: ${t1.cps.toFixed(2)})`);
-  check("key holds ~40-90 ms, some rollover", holds.min >= 35 && holds.max <= 100 && t4.rollovers > 0, `ms ${holds.text}, ${t4.rollovers} rollovers`);
+  check("key holds ~40-90 ms, some rollover", mostly(t4.holds, 35, 100) && t4.rollovers > 0, `ms ${holds.text}, ${t4.rollovers} rollovers`);
   check("values are right", r.values.name === sentence && r.values.bio === long);
   console.log(`      fill times: ${[f1, f2, f3, f4].map((f) => `${(f.ms / 1000).toFixed(1)} s`).join(", ")}`);
 }
@@ -510,11 +536,15 @@ async function runtimeDomain() {
   const r0 = await report(tag, 600);
   check("Runtime hidden: no console output, no detection", !hidden.includes("abh-marker-early") && r0.runtimeHits === 0, `${r0.runtimeHits}/${r0.runtimeChecks} detections`);
   const on = await runtime("on");
-  await Bun.sleep(300);
-  const shown = (await ab("console")).out;
+  // The command returns before agent-browser has taken in the messages Chrome replays to it.
+  const shown = await until(async () => {
+    const { out } = await ab("console");
+    return out.includes("abh-marker-early") ? out : undefined;
+  }, "the earlier console message", 5_000).catch(async () => (await ab("console")).out);
   const r1 = await report(tag, 600);
   check("runtime on: console shows earlier messages", on.code === 0 && shown.includes("abh-marker-early") && r1.runtimeHits > 0, `${on.out}; marker ${shown.includes("abh-marker-early") ? "shown" : "missing"}, ${r1.runtimeHits} detections`);
   const off = await runtime("off");
+  // Detections already on their way when Runtime went off still count; they are left to land before the baseline.
   await Bun.sleep(400);
   const hitsAtOff = (await report(tag, 400)).runtimeHits;
   await ab("eval", "console.log('abh-marker-late'); 1");
@@ -556,6 +586,7 @@ async function tabSwitch() {
 async function rebrowser() {
   console.log("\n# rebrowser bot detector");
   const leak = async () => {
+    // Someone else's page, which runs its checks for a few seconds and does not say when it is done.
     await Bun.sleep(5000);
     const text = JSON.parse((await ab("eval", "document.body.innerText")).out || '""') as string;
     return /(\S+) runtimeEnableLeak\t[^\t]*\t([^\n]*)/.exec(text);
