@@ -28,7 +28,7 @@ There is no npm package. Install a release, or link a clone of this repository.
 **A release.** Each release on [GitHub Releases](https://github.com/ricky9w/agent-browser-humanize/releases) has a tarball, `agent-browser-humanize-<version>.tar.gz`, with the command in `bin/`, the code, the [skill](#agent-skill), this README and the license. It needs no `bun install`: the proxy has no runtime dependencies. Unpack it into a directory of its own and link the command into a directory on your `PATH`:
 
 ```sh
-version=0.1.0
+version=0.1.1
 mkdir -p ~/opt/agent-browser-humanize/releases ~/.local/bin
 curl -fsSL "https://github.com/ricky9w/agent-browser-humanize/releases/download/v$version/agent-browser-humanize-$version.tar.gz" |
   tar -xz -C ~/opt/agent-browser-humanize/releases

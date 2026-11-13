@@ -1,6 +1,6 @@
 {
   "name": "agent-browser-humanize",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "CDP proxy for agent-browser: hides the Runtime domain from pages, makes input human-like, and keeps agent tabs focused in the background.",
   "keywords": [
     "pi-package",
